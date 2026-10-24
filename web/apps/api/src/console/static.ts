@@ -100,7 +100,17 @@ export interface Asset {
 export async function readAsset(build: ConsoleBuild, urlPath: string): Promise<Asset | null> {
   if (!build.present) return null
 
-  const clean = decodeURIComponent(urlPath.split('?')[0] ?? '/')
+  // The router has decoded what it could and left an escape it could not, such
+  // as `%zz` or a lone `%`, exactly as it arrived. decodeURIComponent throws on
+  // those, and the throw reached the error handler as a 500. No file in the
+  // build has a name that only decodes this way, so it is a page that is not
+  // there.
+  let clean: string
+  try {
+    clean = decodeURIComponent(urlPath.split('?')[0] ?? '/')
+  } catch {
+    return notFoundPage(build)
+  }
   const candidates =
     clean === '/' || clean === ''
       ? ['index.html']
