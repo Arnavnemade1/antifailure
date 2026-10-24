@@ -74,6 +74,9 @@ import {
 import { POSTHOG_REGIONS, postHogRegionFrom, postHogSummary } from './analytics/posthog.ts'
 import { createPostHogSink, postHogSinkSummary } from './analytics/posthog-sink.ts'
 import { startWebsiteRefreshWorker } from './website-refresh.ts'
+import { ArtifactStores } from './artifacts/store.ts'
+import { PostgresArtifactStore } from './artifacts/postgres-store.ts'
+import { sweepExpiredArtifacts } from './artifacts/sweep.ts'
 
 function required(name: string, ...fallbacks: string[]): string {
   for (const n of [name, ...fallbacks]) {
@@ -571,9 +574,14 @@ export async function startControlPlane(hooks: BootHooks = {}): Promise<ControlP
     }
   }
 
+  // One set of artifact stores for the routes and the retention sweep, so the
+  // two can never disagree about which backends this process can reach.
+  const artifactStores = new ArtifactStores(new PostgresArtifactStore())
+
   const { app, ingestLimiter, authLimiter, failures } = createServer({
     pool,
     adminPool,
+    artifactStores,
     github,
     clock: systemClock,
     // The same value the seam handed the edition, not a second read of the
@@ -730,6 +738,22 @@ export async function startControlPlane(hooks: BootHooks = {}): Promise<ControlP
       void sweepExpiredWorkflowTokens(pool, systemClock).catch((err) =>
         console.error('workflow token sweep', err),
       )
+
+      // Retention for uploaded run artifacts, the fifth of the same kind. It
+      // removes the bytes of every artifact past the expiry it was stored with
+      // and leaves the row saying so; see artifacts/sweep.ts. One batch a pass,
+      // so a backlog is worked down over a few passes rather than in one
+      // transaction long enough to trip the statement timeout.
+      void sweepExpiredArtifacts(pool, artifactStores)
+        .then((swept) => {
+          if (swept.unreachable > 0) {
+            console.error('artifact sweep', {
+              unreachable: swept.unreachable,
+              why: 'artifacts are due for removal in a backend this process was not given',
+            })
+          }
+        })
+        .catch((err) => console.error('artifact sweep', err))
 
       // Not housekeeping. This one finishes work a customer asked for and is the
       // only thing that gets a deletion past the paid period it is waiting out,

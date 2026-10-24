@@ -448,6 +448,10 @@ func (o *Orchestrator) Test(ctx context.Context, opts TestOptions) (*TestReport,
 	// not be announced while its database checks are still running.
 	o.reportVerdicts(rs, id, report.Results)
 	o.reportRunFinished(rs, id, runStartedAt, report, "complete")
+	// After the run is finished and reported, so the recordings are filed
+	// under a run the control plane already holds, and so an upload that is
+	// slow or refused can never change the verdict.
+	report.Notes = append(report.Notes, o.uploadEvidence(ctx, rs, id, artifacts, report)...)
 	return report, nil
 }
 

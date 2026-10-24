@@ -511,6 +511,12 @@ var typeMap = map[string]string{
 	string(events.AgentFinished): "run.finished",
 	string(events.AgentVerdict):  "verdict.recorded",
 
+	// Identity, for the reason the workload types below give. The upload
+	// route writes the artifact row itself, because it is where the bytes are
+	// checked against their digest; this event is the timeline's record that
+	// it happened, and ingest confirms the artifact it names exists.
+	string(events.ArtifactStored): "artifact.stored",
+
 	string(events.GoldenReady):    "golden.published",
 	string(events.EgressDecision): "network.decision",
 
@@ -543,9 +549,8 @@ var typeMap = map[string]string{
 // does not exist. If something ever does generate a reference page from this,
 // the sentence can come back.
 //
-// Two of the control plane's accepted types have no engine event mapped to
-// them, and the honest reason for both is that the capability behind them is
-// not built.
+// One of the control plane's accepted types has no engine event mapped to it,
+// and the honest reason is that the capability behind it is not built.
 //
 // environment.queued is reserved for a control plane that schedules work. There
 // is no such component. Said plainly because the sentence here used to assert
@@ -555,11 +560,12 @@ var typeMap = map[string]string{
 // environment.queued, so the queued value in the environment_state enum is
 // reachable only as a column default.
 //
-// artifact.stored is reserved for an artifact uploader that reports what it
-// stored. Nothing does.
+// artifact.stored was the second, reserved for an artifact uploader that did
+// not exist. It is mapped now: af test uploads a run's recordings when the
+// organization has turned artifact storage on, and emits this for each one.
 //
-// Both are listed in TestTheControlPlaneTypesWithNoEngineEventAreTheExpectedOnes
-// so that a third appearing is a decision rather than a silent gap. That test
+// The one left is listed in TestTheControlPlaneTypesWithNoEngineEventAreTheExpectedOnes
+// so that a second appearing is a decision rather than a silent gap. That test
 // asks whether a type is MAPPED, which is a weaker question than whether
 // anything emits it, and the difference is not academic: five of the
 // types this map does translate are emitted by nothing, so they pass that test

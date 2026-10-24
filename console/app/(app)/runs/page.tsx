@@ -3,7 +3,7 @@
 import { Fragment, Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { bytes, when } from "@/lib/format";
-import { mutate, query, useApi, usePages } from "@/lib/api";
+import { apiHref, mutate, query, useApi, usePages } from "@/lib/api";
 import { may } from "@/lib/roles";
 import { useSessionContext } from "@/components/session";
 import { More } from "@/components/pagination";
@@ -91,10 +91,26 @@ interface Artifact {
   id: string;
   kind: string;
   step: number | null;
+  /** The workflow the file is evidence for, and empty for one recorded before
+   *  the runner said which. */
+  workflow: string;
   content_type: string | null;
   size_bytes: string | number | null;
   sha256: string | null;
   retained: boolean;
+  /** When the retention sweep drops it, and null for one kept until somebody
+   *  decides otherwise. */
+  expires_at: string | null;
+}
+
+/**
+ * Where an artifact is opened. Only a kept one with a type has bytes behind it;
+ * the control plane answers 410 for the rest, and a link that leads to a
+ * refusal is worse than none.
+ */
+function artifactHref(a: Artifact): string | null {
+  if (!a.retained || !a.content_type) return null;
+  return apiHref(`/v1/artifacts/${encodeURIComponent(a.id)}`);
 }
 
 function seconds(ms: number | null): string {
@@ -260,44 +276,76 @@ function Detail({ runId, onClose }: { runId: string; onClose: () => void }) {
 
       <Card
         title="Artifacts"
-        note="What the run kept. Retention is a policy decision, so an artifact that was dropped says so rather than vanishing."
+        note="The recordings the runner uploaded for each workflow. Retention is a policy decision, so an artifact that was dropped says so rather than vanishing."
       >
-        <Loaded state={artifacts} skeleton={<TableSkeleton rows={3} cols={4} />}>
+        <Loaded state={artifacts} skeleton={<TableSkeleton rows={3} cols={5} />}>
           {(rows) =>
             rows.length === 0 ? (
               <Empty title="No artifacts">
-                Nothing was stored for this run.
+                Nothing was stored for this run. Recordings stay on the machine that ran it
+                unless an administrator turns on artifact storage in Settings.
               </Empty>
             ) : (
               <TableWrap>
                 <Table>
                   <thead>
                     <tr>
+                      <Th>Workflow</Th>
                       <Th>Kind</Th>
                       <Th numeric>Step</Th>
                       <Th>Type</Th>
                       <Th numeric>Size</Th>
                       <Th>Digest</Th>
                       <Th>Retained</Th>
+                      <Th>File</Th>
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((a) => (
-                      <Row key={a.id}>
-                        <Td>{a.kind}</Td>
-                        <Td label="Step" numeric>{a.step ?? "--"}</Td>
-                        <Td label="Type" mono>{a.content_type ?? "--"}</Td>
-                        <Td label="Size" numeric>{bytes(a.size_bytes)}</Td>
-                        <Td label="Digest" mono className="max-w-[18ch] truncate">
-                          {a.sha256 ? a.sha256.slice(0, 12) : "--"}
-                        </Td>
-                        <Td label="Retained">
-                          <Badge tone={a.retained ? "pass" : "neutral"}>
-                            {a.retained ? "kept" : "dropped"}
-                          </Badge>
-                        </Td>
-                      </Row>
-                    ))}
+                    {rows.map((a) => {
+                      const href = artifactHref(a);
+                      return (
+                        <Row key={a.id}>
+                          <Td className="max-w-[28ch] break-words">
+                            {a.workflow || <span className="text-dim">--</span>}
+                          </Td>
+                          <Td label="Kind">{a.kind}</Td>
+                          <Td label="Step" numeric>{a.step ?? "--"}</Td>
+                          <Td label="Type" mono>{a.content_type ?? "--"}</Td>
+                          <Td label="Size" numeric>{bytes(a.size_bytes)}</Td>
+                          <Td label="Digest" mono className="max-w-[18ch] truncate">
+                            {a.sha256 ? a.sha256.slice(0, 12) : "--"}
+                          </Td>
+                          <Td label="Retained">
+                            <Badge tone={a.retained ? "pass" : "neutral"}>
+                              {a.retained ? "kept" : "dropped"}
+                            </Badge>
+                            {a.retained && a.expires_at ? (
+                              <span className="ml-2 text-[12px] text-dim">
+                                until <When value={a.expires_at} />
+                              </span>
+                            ) : null}
+                          </Td>
+                          <Td label="File">
+                            {href ? (
+                              // A plain link and a new tab: the control plane
+                              // decides whether the browser shows the file or
+                              // saves it, and a video or a screenshot should
+                              // not replace the run it is evidence for.
+                              <a
+                                href={href}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="-mx-1 -my-2 inline-flex min-h-11 items-center px-1 py-2 underline decoration-[rgba(16,16,16,0.35)] underline-offset-4 hover:decoration-ink sm:min-h-0"
+                              >
+                                {a.kind === "trace" ? "Download" : "Open"}
+                              </a>
+                            ) : (
+                              <span className="text-dim">--</span>
+                            )}
+                          </Td>
+                        </Row>
+                      );
+                    })}
                   </tbody>
                 </Table>
               </TableWrap>

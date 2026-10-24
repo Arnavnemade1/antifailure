@@ -60,6 +60,10 @@
           "description": "A workflow reached a verdict."
         },
         {
+          "const": "artifact.stored",
+          "description": "A run's video, trace or screenshot was uploaded to the control plane. The data carries the artifact's identifier, its kind, its workflow, its size and its digest."
+        },
+        {
           "const": "build.failed",
           "description": "A service build failed."
         },

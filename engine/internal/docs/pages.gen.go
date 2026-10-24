@@ -14001,6 +14001,140 @@ name instead, which is a configuration an operator can fix in a minute.
 Keep it outside the database. It is the whole point: somebody with a copy of the
 database and no copy of this secret has nothing.
 `,
+	"guides/run-recordings.md": `---
+title: Run recordings
+description: Uploading each workflow's video, trace and screenshot to the control plane, so a failed run can be inspected after the machine that ran it is gone.
+sidebar:
+  order: 30
+---
+
+A run records a video, a Playwright trace and a screenshot for every workflow
+it drives, under ` + "`" + `.antifailure/artifacts/<environment>` + "`" + `. On a laptop those
+files are there to open. On a CI runner they are deleted with the job, and the
+person sent a link to a failed run gets a verdict with no way to see why.
+
+When a run reports to a control plane and the organization has turned on
+artifact storage, the engine uploads each workflow's recordings after the run
+finishes. The run's page in the console lists them, with a link to open each
+one.
+
+## Turning it on
+
+Storage is off for every organization until somebody turns it on. An owner or
+an administrator does that in the console, under **Settings**, **Artifact
+storage**, and chooses how many days to keep each file, from 1 to 365. The
+default is 30. Every change is written to the audit log with the value it
+replaced.
+
+It is off by default because a recording shows whatever the application showed
+the runner. Read
+[run recordings on the trust boundary page](/docs/security/data-boundary#run-recordings-when-an-organization-turns-them-on)
+before you turn it on. It says what a recording can hold and who can open one.
+
+## What a run sends
+
+One file of each kind per workflow:
+
+| Kind | Types | Largest |
+| --- | --- | --- |
+| Video | WebM, MP4 | 64 MiB |
+| Trace | Playwright trace, as a ZIP | 64 MiB |
+| Screenshot | PNG, JPEG | 8 MiB |
+
+A file is sent only if it is a regular file inside the environment's artifacts
+directory once symlinks are resolved. A path that points anywhere else is
+refused, even if the runner's report names it. A file over its limit is not
+read. The engine sends the file's size and SHA-256 with it, and the control
+plane refuses a body that matches neither, or one whose first bytes are not
+the type it claims.
+
+The run's report says what happened:
+
+` + "`" + "`" + "`" + `text
+uploaded 3 recording(s) for 1 workflow(s), 2.8 MB, to the control plane; the run's page in the console shows them
+` + "`" + "`" + "`" + `
+
+A file that was not sent gets a line of its own that says why. When storage is
+off, the report says that once and sends nothing more.
+
+## Keeping recordings on the machine
+
+Set ` + "`" + `AF_ARTIFACTS=local` + "`" + ` and the engine sends no recordings, whatever the
+organization decided:
+
+` + "`" + "`" + "`" + `bash
+AF_ARTIFACTS=local af test
+` + "`" + "`" + "`" + `
+
+Use it on a machine whose recordings must never leave it. The run's report says
+the recordings stayed there and why.
+
+## Opening one
+
+Open the run in the console. The **Artifacts** card lists each file with its
+workflow, size, digest and the date it expires. **Open** shows a video or a
+screenshot in a new tab, and a video can be scrubbed. **Download** saves a
+trace, named for its workflow. For a workflow called Sign in, open it with:
+
+` + "`" + "`" + "`" + `bash
+npx playwright show-trace "Sign in-trace.zip"
+` + "`" + "`" + "`" + `
+
+A member who can see the run's environment can open its recordings. A link to
+another organization's artifact returns not found.
+
+## How long they are kept
+
+Each file gets its expiry when it is stored: the organization's retention, by
+the database's clock. A housekeeping sweep deletes the bytes after that. The
+row stays and is listed as dropped, so the run's page shows that a recording
+existed rather than looking as if none was made.
+
+A new retention applies to files stored after the change. Files already kept
+expire on the date they were stored with. Turning storage off stops new uploads
+and leaves the files that are already kept until they expire.
+
+## Limits
+
+An organization keeps at most 2 GiB of recordings. An upload that would pass
+that is refused, and the report says how much the organization holds. Space
+comes back as kept files expire.
+
+One control plane process holds at most 192 MiB of uploads in memory at once.
+When it is full it asks the engine to wait, and the engine retries. It also
+retries when the control plane has not yet received the run's own events,
+after sending any events it still holds. Each file gets four attempts. After two network failures in
+a row the engine stops and leaves the rest on the machine.
+
+## Where they are stored
+
+In the control plane's Postgres database, in one megabyte chunks in the
+` + "`" + `artifact_chunks` + "`" + ` table. That has two consequences for a self-hosted
+installation. A database backup includes the recordings, so plan backup storage
+for up to 2 GiB per organization that turns this on. Restoring a backup also
+restores the recordings it held.
+
+Each artifact row names the backend that holds its bytes, and the control plane
+reads and writes through a store interface chosen by that name. Postgres is the
+only backend today. An object store such as Azure Blob Storage can be added as a
+second backend without moving the files already stored, because each row keeps
+the name of the backend that holds it.
+
+## What this does not do
+
+It does not upload during a run. Recordings are sent after the run finishes, so
+a run that is still going has none on its page yet.
+
+It is not set per environment or per repository. The switch belongs to the
+organization.
+
+It does not reach a run that reports to no control plane. Those recordings stay
+where they are, which is the ordinary case on a developer's machine.
+
+Related: [the trust boundary](/docs/security/data-boundary),
+[watching a run](/docs/guides/dashboard),
+[workflows](/docs/guides/workflows).
+`,
 	"guides/sandbox.md": `---
 title: Sandbox credentials
 description: How a live key stays outside the environment while sandbox calls still work.
@@ -21282,6 +21416,11 @@ crashed, a page that never loaded, or a persona with no password is not
 evidence about the application, and charging it to the application is how
 people learn to ignore the results. Only a real failure exits non zero.
 
+A run that reports to a control plane uploads each workflow's video, trace and
+screenshot once it finishes, if the organization has turned on artifact
+storage, and the run's page in the console shows them. AF_ARTIFACTS=local keeps
+them on this machine whatever the organization decided.
+
 ` + "`" + "`" + "`" + `
 af test [flags]
 ` + "`" + "`" + "`" + `
@@ -27221,6 +27360,7 @@ This page is generated from ` + "`" + `schemas/events.v1.json` + "`" + `. Edit t
 | ` + "`" + `agent.started` + "`" + ` | An agent workflow has started. |
 | ` + "`" + `agent.step` + "`" + ` | An agent took one action. The data carries its stated intent. |
 | ` + "`" + `agent.verdict` + "`" + ` | A workflow reached a verdict. |
+| ` + "`" + `artifact.stored` + "`" + ` | A run's video, trace or screenshot was uploaded to the control plane. The data carries the artifact's identifier, its kind, its workflow, its size and its digest. |
 | ` + "`" + `build.failed` + "`" + ` | A service build failed. |
 | ` + "`" + `build.finished` + "`" + ` | A service build succeeded. The data carries the image digest. |
 | ` + "`" + `build.log` + "`" + ` | A line of build output, redacted. |
@@ -28465,7 +28605,7 @@ detail behind a row.
 | Production rows | No | ` + "`" + `engine/internal/db/pgcopy/pgcopy.go` + "`" + ` |
 | The golden | No | ` + "`" + `engine/internal/db/docker/docker.go` + "`" + ` |
 | Credentials | No | ` + "`" + `engine/internal/redact/redact.go` + "`" + ` |
-| Artifacts | No | ` + "`" + `engine/internal/workload/result.go` + "`" + ` |
+| Run recordings | Opt in | ` + "`" + `engine/internal/env/evidence.go` + "`" + ` |
 | Table and column names | Yes | ` + "`" + `engine/internal/env/golden.go` + "`" + ` |
 | Rows per table | Yes | ` + "`" + `engine/internal/env/golden.go` + "`" + ` |
 | Repository and branch | Yes | ` + "`" + `engine/internal/env/identity.go` + "`" + ` |
@@ -28480,7 +28620,7 @@ detail behind a row.
 
 ## What never leaves the machine
 
-Four of those rows say no, and each is a different mechanism rather than the
+Three of those rows say no, and each is a different mechanism rather than the
 same promise repeated.
 
 **Production rows.** The engine connects to production from the machine it runs
@@ -28512,11 +28652,61 @@ environment: ` + "`" + `TokenFromEnvironment` + "`" + ` is deliberately the only
 there is no path by which this code could write one into a file in your
 repository.
 
-**Artifacts.** The engine uploads nothing. A trace, a screenshot or a video is
-recorded with its path, its size and its hash, and with an availability of
-` + "`" + `runner_local` + "`" + `, which the type's own comment explains is there so a console
-cannot render a path as a link and send somebody to a file that was never
-theirs to open.
+## Run recordings, when an organization turns them on
+
+The runner records a video, a Playwright trace and a screenshot for each
+workflow it drives. They stay in the environment's artifacts directory unless
+two things are both true: the run reports to a control plane, and the
+organization has turned on artifact storage. Each side refuses on its own.
+
+**The control plane refuses until somebody decides.** Storage is off for every
+organization, including one that existed before this was built.
+` + "`" + `web/packages/db/migrations/0052_the_evidence_nothing_uploaded.sql` + "`" + ` adds the
+switch with a default of false, and the upload route in
+` + "`" + `web/apps/api/src/artifacts/routes.ts` + "`" + ` answers 403 before it reads a byte of the
+body. Only an owner or an administrator can turn it on, from Settings in the
+console, and every change goes to the audit log with what it was before.
+
+**The engine can refuse whatever the organization decided.** A run started with
+` + "`" + `AF_ARTIFACTS=local` + "`" + ` sends nothing and says so in its report. That is for a
+machine whose recordings must never leave it, whoever administers the
+organization.
+
+**Only files the run made are sent.** The paths come from the runner's report,
+and a report is a file on disk. ` + "`" + `collectEvidence` + "`" + ` sends a path only if it
+resolves, symlinks and all, to a regular file inside this environment's
+artifacts directory, so a path in a report that named a key file is refused
+rather than uploaded. A video or a trace may be at most 64 MiB and a screenshot
+8 MiB. The control plane checks the declared type against the file's own first
+bytes, and the SHA-256 against the body it received.
+
+**Where they are kept.** In the control plane's own Postgres database, in an
+` + "`" + `artifact_chunks` + "`" + ` table, so a database backup holds them too. The table is under
+the same row-level security as every tenant table. The installation operator's
+read role, ` + "`" + `antifailure_admin` + "`" + `, is granted read on every table by default and
+has that grant revoked on this one: it can read that an artifact exists, its
+size and its hash, and not its contents. The code reads and writes through a store interface named by a
+` + "`" + `backend` + "`" + ` column on each artifact, so a later object-store backend changes where
+the bytes are and not who may read them.
+
+**How long.** 30 days unless the organization chooses between 1 and 365. The
+expiry is computed by the database's clock when the file is stored, so a change
+applies to files stored after it, and a sweep deletes the bytes once it passes. The row stays, marked dropped, so a run's page
+lists the recording as dropped rather than as never made.
+
+**Who can open one.** A signed-in member of the organization who can view
+environments. A request for another organization's artifact is answered as if
+it did not exist. The file is served with ` + "`" + `Content-Security-Policy: default-src
+'none'; sandbox` + "`" + `, ` + "`" + `X-Content-Type-Options: nosniff` + "`" + ` and ` + "`" + `Cache-Control: private,
+no-store` + "`" + `, so a recording cannot run script on the console's origin and is not
+kept by a shared cache.
+
+**What a recording holds.** Whatever the application showed the runner. The
+runner drives the twin, which is masked, so a recording carries what the masked
+copy displays. It inherits the limit in
+[masking and its check are the same instrument](#masking-and-its-check-are-the-same-instrument):
+a page that renders a column of a type outside the six shows that column's real
+value, and the video and the screenshot show it too.
 
 ## The direction of every connection
 

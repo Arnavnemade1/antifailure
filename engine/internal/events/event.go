@@ -89,6 +89,10 @@ const (
 	AgentStep     Type = "agent.step"
 	AgentVerdict  Type = "agent.verdict"
 	AgentFinished Type = "agent.finished"
+	// ArtifactStored is a run's recording that reached the control plane:
+	// its video, its trace or its screenshot, uploaded after the run because
+	// the organization turned artifact storage on.
+	ArtifactStored Type = "artifact.stored"
 
 	// Insights and load
 	InsightFinding Type = "insight.finding"
@@ -177,9 +181,11 @@ var typeDocs = map[Type]string{
 	AgentStep:        "An agent took one action. The data carries its stated intent.",
 	AgentVerdict:     "A workflow reached a verdict.",
 	AgentFinished:    "An agent run finished. The data carries the verdict counts.",
-	InsightFinding:   "A database insight was found: a lock, a regression, or a plan change.",
-	LoadSample:       "A load test metric sample.",
-	LoadFinished:     "A load run finished. The data carries the comparison against main.",
+	ArtifactStored: "A run's video, trace or screenshot was uploaded to the control plane. " +
+		"The data carries the artifact's identifier, its kind, its workflow, its size and its digest.",
+	InsightFinding: "A database insight was found: a lock, a regression, or a plan change.",
+	LoadSample:     "A load test metric sample.",
+	LoadFinished:   "A load run finished. The data carries the comparison against main.",
 	WorkloadStarted: "A hosted workload run has been claimed and started. " +
 		"The data carries the control plane's run identifier.",
 	WorkloadFinished: "A hosted workload run ended and reported what it measured. " +

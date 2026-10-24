@@ -121,6 +121,8 @@ function inputsFor(org: Org): Record<string, unknown> {
     'subscriptions.cancel': { reason: 'testing the matrix' },
     'subscriptions.reconcile': {},
     'org.suspend': { reason: 'testing the matrix' },
+    'org.artifactStorage': {},
+    'org.setArtifactStorage': { enabled: false, retentionDays: 30 },
     'org.resume': {},
 
     // Running the organization.

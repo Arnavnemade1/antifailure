@@ -173,6 +173,9 @@ import { validateLead, recordLead, leadMessage, type LeadNotifier } from './ente
 import { mountApplicationRoutes } from './recruitment/routes.ts'
 import { mountWebsitePublished } from './admin/website-public.ts'
 import { mountWebsiteMedia, websiteMediaUploadGuard } from './admin/website-media.ts'
+import { mountArtifacts, type ArtifactRouteOptions } from './artifacts/routes.ts'
+import { ArtifactStores } from './artifacts/store.ts'
+import { PostgresArtifactStore } from './artifacts/postgres-store.ts'
 import {
   limitFor, bucketFor, bodyLimitFor, servedRoute, ENDPOINT_LIMITS, type EndpointLimit,
 } from './limits.ts'
@@ -315,6 +318,14 @@ export interface ServerOptions {
   providerBases?: Record<string, string>
   ingestLimit?: { rate: number; burst: number }
   authLimit?: { rate: number; burst: number }
+  /**
+   * Where uploaded run artifacts are written and read from. Unset means this
+   * database, which every installation has; see artifacts/store.ts for why it
+   * is an interface and how a second backend is added beside it.
+   */
+  artifactStores?: ArtifactStores
+  /** The artifact limits, overridden by tests that need small ones. */
+  artifactLimits?: Pick<ArtifactRouteOptions, 'orgQuotaBytes' | 'inFlightBytes' | 'bodyDeadlineMs'>
   /** The build, reported as a label on af_control_plane_info so a graph can
    *  say which version produced a number. */
   version?: string
@@ -1948,6 +1959,13 @@ export function createServer(options: ServerOptions) {
   mountApplicationRoutes(app, { pool: options.pool, clock, siteOrigins })
   mountWebsitePublished(app, { pool: options.pool, siteOrigins })
   mountWebsiteMedia(app, websiteMedia)
+  mountArtifacts(app, {
+    pool: options.pool,
+    clock,
+    stores: options.artifactStores ?? new ArtifactStores(new PostgresArtifactStore()),
+    hostedRequiredPlan,
+    ...options.artifactLimits,
+  })
 
   app.options('/v1/leads', (c) => {
     if (!allowLeadOrigin(c)) return c.body(null, 403)

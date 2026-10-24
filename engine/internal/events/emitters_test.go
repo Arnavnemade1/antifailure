@@ -306,6 +306,7 @@ var typeIdentifiers = []struct {
 	{"WebhookFailed", "webhook.failed"},
 	{"AgentStarted", "agent.started"}, {"AgentStep", "agent.step"},
 	{"AgentVerdict", "agent.verdict"}, {"AgentFinished", "agent.finished"},
+	{"ArtifactStored", "artifact.stored"},
 	{"InsightFinding", "insight.finding"},
 	{"LoadSample", "load.sample"}, {"LoadFinished", "load.finished"},
 	{"WorkloadStarted", "workload.started"}, {"WorkloadFinished", "workload.finished"},

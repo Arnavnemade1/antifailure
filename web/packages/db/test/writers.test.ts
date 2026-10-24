@@ -185,14 +185,6 @@ function isCustomerFacingReader(file: string): boolean {
  * cover the next one silently. The fix is to delete the line.
  */
 const UNWIRED: Record<string, string> = {
-  artifacts: [
-    'The runner writes a video, a trace and a screenshot to the environment\'s own artifacts',
-    'directory and nothing uploads them. There is no storage backend, no upload path and no',
-    'download route in the control plane, and artifact.stored is accepted by ingest and mapped',
-    'from no engine event at all. The console\'s artifacts table is therefore empty for every',
-    'customer. Projecting the local paths would be worse than the blank: it would list files',
-    'nobody can fetch. This needs the uploader, not a projector.',
-  ].join(' '),
   sso_connections: [
     'Migration 0014 built a complete single sign-on and SCIM schema, and nothing in the product',
     'ever reads or writes any of it: no route configures a connection, no sign-in path consults',
