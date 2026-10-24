@@ -64,17 +64,13 @@ function cookieFrom(res: Response): string | null {
 /**
  * Headers that put each caller in its own rate-limit bucket.
  *
- * The sign-in route is limited on clientKey(x-forwarded-for, user-agent), and
- * every request from this suite arrives with neither, so without this the whole
+ * The sign-in route is limited on clientKey(x-forwarded-for), and every
+ * request from this suite arrives without one, so without this the whole
  * FILE shares one token bucket: the four parallel attempts in the refusal test
  * drain it and a later test gets 429, which reads exactly like an
  * authentication failure and sent me looking at the gate instead of the
  * limiter. Distinct callers is also the honest shape, since these are meant to
  * be different people signing in.
- *
- * x-forwarded-for rather than user-agent: `new Request()` drops a user-agent
- * set through init.headers, so keying on that silently changed nothing and the
- * bucket stayed shared. Measured by the 429 not moving.
  */
 let caller = 0
 function asNewCaller(): Record<string, string> {

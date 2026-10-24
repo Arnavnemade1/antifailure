@@ -41,8 +41,8 @@ const hasDb = await available()
 /** The auth limiter's burst FOR THESE TESTS, smaller than the one it ships
  *  with, and the reason is a mutation that survived. /auth/github sits behind
  *  two limiters keyed on the same address: the per-endpoint limit in
- *  limits.ts, burst 20 on the address alone, and authLimiter, burst 20 on the
- *  address and user agent. With the shipped numbers a test that sends twenty
+ *  limits.ts, burst 20, and authLimiter, burst 20, both on the address
+ *  alone. With the shipped numbers a test that sends twenty
  *  one requests sees a 429 whichever of the two is right, so restoring the
  *  old first-entry rule in clientKey alone left every assertion green. A
  *  burst of three makes authLimiter the one that refuses first, so the test
@@ -233,6 +233,27 @@ describe(
       assert.equal(statuses[AUTH_BURST], 429, 'garbage bought a fresh bucket per request')
       const [direct] = await knock(h, '/auth/github', 1, () => null)
       assert.equal(direct, 429, 'a request with no header did not share the unknown bucket')
+    })
+
+    it('limits a caller who sends a new user agent on every request', async () => {
+      // The same walk around as the forged first entry, through the other half
+      // of the key. The user agent is whatever the caller types, so a bucket
+      // keyed on it was a fresh bucket per request for anybody who changed it.
+      const real = '198.51.100.12'
+      const statuses: number[] = []
+      for (let i = 0; i <= AUTH_BURST; i += 1) {
+        const res = await h.fetch('/auth/github', {
+          redirect: 'manual',
+          headers: { 'x-forwarded-for': real, 'user-agent': `agent-${randomUUID()}` },
+        })
+        statuses.push(res.status)
+      }
+      assert.deepEqual(
+        statuses.slice(0, AUTH_BURST),
+        new Array(AUTH_BURST).fill(302),
+        'the burst itself was refused, so the test is not measuring the limiter',
+      )
+      assert.equal(statuses[AUTH_BURST], 429, 'a new user agent bought a fresh bucket')
     })
 
     it('limits the per-endpoint bucket on the last entry too', async () => {

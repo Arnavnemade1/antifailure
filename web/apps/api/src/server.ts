@@ -1195,7 +1195,7 @@ export function createServer(options: ServerOptions) {
   }
 
   app.get('/auth/github', async (c) => {
-    const limited = authLimiter.take(clientKey(c.req.header('x-forwarded-for'), c.req.header('user-agent'), trustedProxyHops))
+    const limited = authLimiter.take(clientKey(c.req.header('x-forwarded-for'), trustedProxyHops))
     if (!limited.allowed) return tooMany(c, limited.retryAfterSeconds)
 
     // Refused here, before the redirect, when the answer cannot depend on who
@@ -1242,7 +1242,7 @@ export function createServer(options: ServerOptions) {
   })
 
   app.get('/auth/github/callback', async (c) => {
-    const limited = authLimiter.take(clientKey(c.req.header('x-forwarded-for'), c.req.header('user-agent'), trustedProxyHops))
+    const limited = authLimiter.take(clientKey(c.req.header('x-forwarded-for'), trustedProxyHops))
     if (!limited.allowed) return tooMany(c, limited.retryAfterSeconds)
 
     const code = c.req.query('code')
@@ -1348,7 +1348,7 @@ export function createServer(options: ServerOptions) {
 
   app.post('/v1/admin/signin', async (c) => {
     const limited = authLimiter.take(
-      clientKey(c.req.header('x-forwarded-for'), c.req.header('user-agent'), trustedProxyHops),
+      clientKey(c.req.header('x-forwarded-for'), trustedProxyHops),
     )
     if (!limited.allowed) return tooMany(c, limited.retryAfterSeconds)
 
@@ -1558,7 +1558,7 @@ export function createServer(options: ServerOptions) {
 
     app.post('/auth/email', async (c) => {
       const limited = authLimiter.take(
-        clientKey(c.req.header('x-forwarded-for'), c.req.header('user-agent'), trustedProxyHops),
+        clientKey(c.req.header('x-forwarded-for'), trustedProxyHops),
       )
       if (!limited.allowed) return tooMany(c, limited.retryAfterSeconds)
 
@@ -1599,7 +1599,7 @@ export function createServer(options: ServerOptions) {
 
     app.get('/auth/email/callback', async (c) => {
       const limited = authLimiter.take(
-        clientKey(c.req.header('x-forwarded-for'), c.req.header('user-agent'), trustedProxyHops),
+        clientKey(c.req.header('x-forwarded-for'), trustedProxyHops),
       )
       if (!limited.allowed) return tooMany(c, limited.retryAfterSeconds)
 
@@ -1848,7 +1848,7 @@ export function createServer(options: ServerOptions) {
   /** What the link says, before anybody signs in. */
   app.get('/auth/invitation', async (c) => {
     const limited = authLimiter.take(
-      clientKey(c.req.header('x-forwarded-for'), c.req.header('user-agent'), trustedProxyHops),
+      clientKey(c.req.header('x-forwarded-for'), trustedProxyHops),
     )
     if (!limited.allowed) return tooMany(c, limited.retryAfterSeconds)
 
@@ -1961,7 +1961,7 @@ export function createServer(options: ServerOptions) {
     // The same bucket as the sign-in routes, because this has the same shape:
     // an unauthenticated caller with no credential to key on, and a write.
     const limited = authLimiter.take(
-      clientKey(c.req.header('x-forwarded-for'), c.req.header('user-agent'), trustedProxyHops),
+      clientKey(c.req.header('x-forwarded-for'), trustedProxyHops),
     )
     // The CORS header goes on the refusal too. Without it the browser reports a
     // CORS failure instead of the 429, and the page shows "could not reach the
@@ -2026,7 +2026,7 @@ export function createServer(options: ServerOptions) {
    */
   app.get('/exports/deletion', async (c) => {
     const limited = authLimiter.take(
-      clientKey(c.req.header('x-forwarded-for'), c.req.header('user-agent'), trustedProxyHops),
+      clientKey(c.req.header('x-forwarded-for'), trustedProxyHops),
     )
     if (!limited.allowed) return tooMany(c, limited.retryAfterSeconds)
 
@@ -3724,16 +3724,17 @@ async function readEmailForm(
   }
 }
 
-/** The auth limiter's bucket: the address the trusted proxy saw, and the
- *  user agent. Which entry of the forwarded header is the trusted one, and
- *  why an unparseable one shares a bucket rather than escaping, is in
- *  clientaddress.ts. */
-function clientKey(
-  forwardedFor: string | undefined,
-  userAgent: string | undefined,
-  trustedHops: number,
-): string {
-  return `${clientIP(forwardedFor, trustedHops)}|${(userAgent ?? '').slice(0, 64)}`
+/** The auth limiter's bucket: the address the trusted proxy saw, and nothing
+ *  the caller wrote. Which entry of the forwarded header is the trusted one,
+ *  and why an unparseable one shares a bucket rather than escaping, is in
+ *  clientaddress.ts.
+ *
+ *  The user agent was half of this key, and it is a header the caller types,
+ *  so a new one on every request was a new bucket on every request: the same
+ *  walk around the limit that the forged X-Forwarded-For entry was, through
+ *  the other half of the key. */
+function clientKey(forwardedFor: string | undefined, trustedHops: number): string {
+  return clientIP(forwardedFor, trustedHops)
 }
 
 /**
