@@ -63,6 +63,14 @@ type githubStandIn struct {
 	// download that fails for a reason other than absence can be arranged.
 	denySuffix string
 
+	// holdSuffix, when set, makes the next path ending in it wait until the
+	// client goes away, and reports that it arrived on held. It is how a test
+	// catches the installer part way through a download, which is where
+	// somebody who changed their mind presses Ctrl-C. Once only, so a script
+	// that asks again afterwards gets the answer github.com would give it.
+	holdSuffix string
+	held       chan string
+
 	// asked records every path requested, so a test can assert which host the
 	// script chose to ask rather than trusting that it chose the new one.
 	asked []string
@@ -105,9 +113,23 @@ func (g *githubStandIn) agentsSeen() []string {
 func (g *githubStandIn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	tag, status, deny, elsewhere := g.tag, g.status, g.denySuffix, g.elsewhere
+	hold, held := g.holdSuffix, g.held
+	holding := hold != "" && strings.HasSuffix(r.URL.Path, hold)
+	if holding {
+		g.holdSuffix = ""
+	}
 	g.asked = append(g.asked, r.URL.Path)
 	g.agents = append(g.agents, r.UserAgent())
 	g.mu.Unlock()
+
+	if holding {
+		select {
+		case held <- r.URL.Path:
+		default:
+		}
+		<-r.Context().Done()
+		return
+	}
 
 	if deny != "" && strings.HasSuffix(r.URL.Path, deny) {
 		http.Error(w, "rate limit exceeded", http.StatusForbidden)
