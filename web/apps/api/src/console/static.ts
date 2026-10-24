@@ -15,6 +15,7 @@
 import { createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { join, normalize, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { trimTrailingSlashes } from '../trailingslash.ts'
 
 export interface ConsoleBuild {
@@ -51,7 +52,10 @@ export async function findConsoleBuild(dir?: string): Promise<ConsoleBuild> {
 
 function defaultDir(): string {
   // src/console/static.ts -> apps/api/src/console -> up four is the app root.
-  return resolve(new URL('../../../../console-out', import.meta.url).pathname)
+  // fileURLToPath rather than `.pathname`, which is still percent encoded, so
+  // a checkout under a directory with a space in its name looked for
+  // `My%20Projects/.../console-out`, and on Windows begins `/C:/`.
+  return resolve(fileURLToPath(new URL('../../../../console-out', import.meta.url)))
 }
 
 const TYPES: Record<string, string> = {
