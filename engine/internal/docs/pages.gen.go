@@ -16422,9 +16422,12 @@ The source connection carries production's credential and its unmasked rows,
 so a source on another machine is reached over verified TLS unless the
 address says otherwise: with no ` + "`" + `tls=` + "`" + `, the server must present a certificate
 this machine trusts for that host name, and a server that cannot is refused
-with AF-DB-046 naming the host. A server on this machine, ` + "`" + `localhost` + "`" + ` or a
-loopback address, defaults to ` + "`" + `tls=preferred` + "`" + ` instead, because a local server
-rarely has such a certificate and its traffic crosses nobody else's network.
+with AF-DB-046 naming the host. An address that is literally a loopback
+address, such as ` + "`" + `127.0.0.1` + "`" + ` or ` + "`" + `::1` + "`" + `, or exactly ` + "`" + `localhost` + "`" + `, defaults to
+` + "`" + `tls=preferred` + "`" + ` instead, because a local server rarely has such a certificate
+and its traffic crosses nobody else's network. Any other name is verified even
+if it resolves to this machine, because whoever controls that resolution
+decides where it points.
 To accept the risk for a remote source, write the mode into the address:
 
 | ` + "`" + `tls=` + "`" + ` | What it does | What it exposes |

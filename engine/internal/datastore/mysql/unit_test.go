@@ -190,6 +190,9 @@ func TestParseURL_AHostOnAnotherMachineDefaultsToVerifiedTLS(t *testing.T) {
 	for _, host := range []string{
 		"db.internal", "prod.example.com:3307", "10.0.0.5", "[2001:db8::1]:3306",
 		"localhost.example.com", "128.0.0.1",
+		// Names that resolve, so whoever controls the resolution decides
+		// where they point: never the weaker default on a source.
+		"af-mysql:3306", "x.localhost", "db.localhost:3306", "localhost.",
 	} {
 		s, err := parseURL(secrets.New("mysql://app:pw@" + host + "/shop"))
 		require.NoError(t, err, host)
@@ -223,7 +226,7 @@ func TestParseURL_LoopbackDefaultsToPreferred(t *testing.T) {
 	t.Parallel()
 	for _, host := range []string{
 		"127.0.0.1:3306", "127.5.5.5", "[::1]:3306", "localhost", "LOCALHOST:3306",
-		"db.localhost", "af-mysql:3306", "[::ffff:127.0.0.1]:3306",
+		"[::ffff:127.0.0.1]:3306",
 	} {
 		s, err := parseURL(secrets.New("mysql://root:pw@" + host + "/"))
 		require.NoError(t, err, host)
@@ -285,4 +288,21 @@ func TestTLSMode_SaysWhatTheWeakModesExpose(t *testing.T) {
 	}
 	_, _, _, ok = TLSMode(secrets.New("mariadb://app:hunter2@db.internal/shop"))
 	require.False(t, ok)
+}
+
+// The managed server's container name is trusted on the provider's own
+// connection to it, and only there: the same name in a source address is
+// verified, which the test above holds.
+func TestNew_TheManagedServerByNameKeepsPreferred(t *testing.T) {
+	t.Parallel()
+	p, err := New(Options{ServerURL: secrets.New("mysql://root:x@" + LocalServerName + ":3306/")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close() })
+	require.Equal(t, "preferred", p.server.tls)
+
+	stated, err := New(Options{ServerURL: secrets.New("mysql://root:x@" + LocalServerName +
+		":3306/?tls=true")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stated.Close() })
+	require.Equal(t, "true", stated.server.tls, "a mode the address states is still honoured")
 }

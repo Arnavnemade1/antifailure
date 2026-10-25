@@ -57,9 +57,10 @@ type server struct {
 // on the path would read both. It used to be the default here, and MySQL
 // support was new enough that nobody relied on it.
 //
-// A loopback host, and the managed store server's own name, default to
-// preferred: a local server usually has no certificate a verifier would
-// accept, and nothing between it and this process is somebody else's network.
+// A loopback address or exactly localhost defaults to preferred: a local
+// server usually has no certificate a verifier would accept, and nothing
+// between it and this process is somebody else's network. See isLoopback for
+// why no other name qualifies.
 //
 // An explicit tls=preferred, skip-verify or false is the author's stated
 // choice and is honoured. af explain says which mode a source is using.
@@ -100,19 +101,26 @@ func parseURL(v secrets.Value) (*server, error) {
 }
 
 // defaultTLS is the mode a URL with no tls= gets for its host: preferred on
-// this machine and on the managed store server, verified everywhere else.
+// this machine, verified everywhere else.
 func defaultTLS(host string) string {
-	if isLocalHost(host) {
+	if isLoopback(host) {
 		return "preferred"
 	}
 	return "true"
 }
 
-// isLocalHost reports a host whose traffic never crosses a network somebody
-// else runs: loopback by name or by address, or the managed server.
-func isLocalHost(host string) bool {
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
-	if h == "localhost" || strings.HasSuffix(h, ".localhost") || h == LocalServerName {
+// isLoopback reports a host that is this machine by what it literally says:
+// an address in 127.0.0.0/8 or ::1, or exactly localhost.
+//
+// Only those. Any other name is resolved, through DNS or a hosts file, and a
+// source address naming af-mysql or something.localhost can be pointed at a
+// server on another machine by whoever controls that resolution, which would
+// hand production's credential to the weaker default. The managed server's
+// own name gets preferred only on the connection the provider makes to it,
+// in New, never on an address parsed as a source.
+func isLoopback(host string) bool {
+	h := strings.ToLower(host)
+	if h == "localhost" {
 		return true
 	}
 	if ip, err := netip.ParseAddr(strings.Trim(h, "[]")); err == nil {

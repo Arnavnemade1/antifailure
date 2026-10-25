@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -95,6 +96,13 @@ func New(opts Options) (*Provider, error) {
 		return nil, err
 	}
 	s = s.in("")
+	if host, _, _ := net.SplitHostPort(s.addr); host == LocalServerName && !s.tlsStated {
+		// The managed server, reached by its container name. It has no
+		// certificate, and this is the provider's own connection to the
+		// server it runs, never an address somebody configured as a source,
+		// so the name is trusted here and nowhere else.
+		s.tls = "preferred"
+	}
 	name := opts.Name
 	if name == "" {
 		name = engineName
