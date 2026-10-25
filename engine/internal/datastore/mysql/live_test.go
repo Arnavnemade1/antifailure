@@ -521,10 +521,15 @@ func TestRefresh_RefusesASourceAddressItCannotRead(t *testing.T) {
 		"mariadb://" + u.User.String() + "@" + u.Host + "/" + srcName,
 		u.User.Username() + ":" + password + "@tcp(" + u.Host + ")/" + srcName,
 	} {
-		_, err := p.RefreshGolden(ctx, provider.GoldenSpec{
+		gv, err := p.RefreshGolden(ctx, provider.GoldenSpec{
 			SourceURL: secrets.New(addr), RulesHash: "rules-addr", Provenance: "project:contacts",
 			Verify: func(context.Context, secrets.Value) (string, error) { return "clean", nil },
 		})
+		if err == nil {
+			// The failure this test exists for is a published golden, so it
+			// removes one rather than leaving it on the server it found.
+			t.Cleanup(func() { _ = p.DestroyGolden(context.Background(), gv.ID) })
+		}
 		require.ErrorContains(t, err, "not a mysql:// URL")
 	}
 	after, err := p.Inventory(ctx)
