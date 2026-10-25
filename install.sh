@@ -186,7 +186,50 @@ tmp=$(mktemp -d)
 #
 # Made here rather than after the version is known, because the second way of
 # asking which release is the newest needs somewhere to put a file.
-trap 'rm -rf "$tmp"' EXIT INT TERM
+#
+# CTRL-C STOPS THE INSTALLER, and it used to be a pause. This was one trap for
+# EXIT, INT and TERM, and a trap that does not exit is a handler that RESUMES:
+# sh, bash, dash and zsh all removed $tmp and went on to the next command. An
+# interrupt during the download killed curl, the script asked github.com again
+# about a download that had not failed, and then said that github.com had not
+# delivered the build, with exit status 1. So a person who pressed Ctrl-C was
+# told the release was broken, and a script that ran this could not tell that
+# it had been cancelled.
+#
+# Each signal is now cleaned up after and then raised again with its own
+# handler removed, so the installer dies of the signal it was sent, which is
+# what lets whatever ran it stop as well. abandon undoes a placement that is
+# part way through; see placing below.
+trap 'rm -rf "$tmp"' EXIT
+trap '{ abandon || :; }; trap - EXIT INT; kill -INT $$' INT
+trap '{ abandon || :; }; trap - EXIT TERM; kill -TERM $$' TERM
+placing=""
+renaming=""
+abandon() {
+  rm -rf "$tmp"
+  # The rename that puts af in place and the line that clears placing are two
+  # commands, and a trap runs between commands, so a signal can arrive with af
+  # already replaced and placing still set. Rolling the runner back then would
+  # pair the old runner with the new af. Once the rename has begun, the
+  # temporary af still existing is what says it did not complete: mv consumes
+  # it on success and leaves it on failure.
+  if [ -n "$placing" ] && [ -n "$renaming" ] && [ ! -e "$BIN_DIR/.af.new.$$" ]; then
+    placing=""
+    [ -z "$runner_aside" ] || rm -rf "$runner_aside"
+  fi
+  [ -n "$placing" ] || return 0
+  rm -f "$BIN_DIR/.af.new.$$"
+  if [ -e "$staged" ]; then
+    # Stopped before the new runner took its place: it goes, and the old one
+    # comes back if it had already been moved aside.
+    rm -rf "$staged"
+    if [ -n "$runner_aside" ] && [ ! -e "$runner_dir" ]; then
+      mv "$runner_aside" "$runner_dir" 2>/dev/null || true
+    fi
+  else
+    restore_runner
+  fi
+}
 
 # Resolving "latest" without asking a rate limited API.
 #
@@ -480,6 +523,9 @@ restore_runner() {
   [ -z "$runner_aside" ] || mv "$runner_aside" "$runner_dir" 2>/dev/null
   rm -rf "$staged"
 }
+# From here until af is in place an interrupt has something to undo, and the
+# signal handlers near the top undo it the same way the failures below do.
+placing=1
 if ! { mkdir -p "$share_dir" && cp -R "$tmp/$name/runner" "$staged"; } 2>/dev/null; then
   rm -rf "$staged"
   die "the runner could not be written to $share_dir, so nothing was installed; check that you can write to it, or set AF_BIN_DIR to somewhere you can"
@@ -500,11 +546,12 @@ fi
 # old one, so the old af stays whole until the new one is complete. A rename
 # within a directory is atomic, and a running af keeps the file it opened.
 if ! { cp "$tmp/$name/af" "$BIN_DIR/.af.new.$$" && chmod 0755 "$BIN_DIR/.af.new.$$" \
-       && mv -f "$BIN_DIR/.af.new.$$" "$BIN_DIR/af"; } 2>/dev/null; then
+       && renaming=1 && mv -f "$BIN_DIR/.af.new.$$" "$BIN_DIR/af"; } 2>/dev/null; then
   rm -f "$BIN_DIR/.af.new.$$"
   restore_runner
   die "af could not be written to $BIN_DIR, so nothing was installed; check that you can write to it, or set AF_PREFIX to somewhere you can"
 fi
+placing=""
 [ -z "$runner_aside" ] || rm -rf "$runner_aside"
 
 # A tree left at the old location by an earlier installer is a source with no

@@ -167,6 +167,15 @@ func (s *session) run() (string, error) {
 	if s.wgetOnly && onPathIn(s.path, "curl") {
 		s.t.Fatal("curl is reachable again in a session that removed it, so the wget half of the installer is not what this ran")
 	}
+	cmd := exec.Command("/bin/sh", "-c", "cat "+filepath.Join(s.root, "install.sh")+" | sh")
+	cmd.Env = s.environ()
+	out, err := cmd.CombinedOutput()
+	assertNoRawToolErrorReachedTheReader(s.t, string(out))
+	return string(out), err
+}
+
+// environ is the whole environment an installer run gets, and nothing else.
+func (s *session) environ() []string {
 	env := []string{
 		"HOME=" + s.home,
 		"PATH=" + s.path,
@@ -178,11 +187,7 @@ func (s *session) run() (string, error) {
 	for k, v := range s.env {
 		env = append(env, k+"="+v)
 	}
-	cmd := exec.Command("/bin/sh", "-c", "cat "+filepath.Join(s.root, "install.sh")+" | sh")
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
-	assertNoRawToolErrorReachedTheReader(s.t, string(out))
-	return string(out), err
+	return env
 }
 
 // assertNoRawToolErrorReachedTheReader is checked on EVERY invocation, and that
