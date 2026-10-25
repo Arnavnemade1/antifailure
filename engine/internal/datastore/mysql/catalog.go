@@ -292,7 +292,7 @@ func Catalog(ctx context.Context, url secrets.Value) (tables []masking.Table, sk
 	defer func() { _ = db.Close() }()
 	read, skips, err := readCatalog(ctx, db, s.database)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, s.refuseUnverified(err)
 	}
 	out := make([]masking.Table, 0, len(read))
 	for _, t := range read {

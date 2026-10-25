@@ -290,7 +290,7 @@ func (p *Provider) dropDatabase(ctx context.Context, name string) error {
 func (p *Provider) RefreshGolden(ctx context.Context, spec provider.GoldenSpec) (provider.GoldenVersion, error) {
 	p.sweepCandidates(ctx)
 
-	source, err := p.openSource(spec.SourceURL)
+	source, err := p.openSource(ctx, spec.SourceURL)
 	if err != nil {
 		return provider.GoldenVersion{}, err
 	}
@@ -399,7 +399,7 @@ type sourceConn struct {
 // each of them a real production that somebody configured, produced an empty
 // golden that verified clean and published looking exactly like a full one.
 // A mysql:// address that names no database is refused for the same reason.
-func (p *Provider) openSource(v secrets.Value) (*sourceConn, error) {
+func (p *Provider) openSource(ctx context.Context, v secrets.Value) (*sourceConn, error) {
 	raw := strings.TrimSpace(v.Reveal())
 	if raw == "" || strings.HasPrefix(raw, placeholderSource) {
 		return nil, nil
@@ -423,6 +423,13 @@ func (p *Provider) openSource(v secrets.Value) (*sourceConn, error) {
 	db, err := s.open(sessionCopy)
 	if err != nil {
 		return nil, err
+	}
+	// Reached now rather than at the first read, so a source that cannot give
+	// the TLS its address requires is refused as that, by name, before a
+	// candidate exists.
+	if err := ping(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, s.refuseUnverified(fmt.Errorf("datastore.mysql: reaching the source: %w", err))
 	}
 	return &sourceConn{server: s, db: db}, nil
 }

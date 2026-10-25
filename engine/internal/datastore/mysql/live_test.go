@@ -536,3 +536,41 @@ func TestRefresh_RefusesASourceAddressItCannotRead(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(before), len(after), "a refused source still made something")
 }
+
+// A source whose address requires verified TLS and whose server cannot give
+// it is refused by name, before anything is made. Required explicitly here,
+// because the test server is on loopback, where the default is preferred; a
+// host on another machine gets the same requirement with no tls= at all.
+func TestRefresh_RefusesASourceThatCannotProveItsCertificate(t *testing.T) {
+	server := requireServer(t)
+	srcName, src := source(t, server)
+	exec(t, src, `CREATE TABLE contacts (id INT PRIMARY KEY)`)
+	u, err := url.Parse(server.Reveal())
+	require.NoError(t, err)
+
+	p, err := mysql.New(mysql.Options{ServerURL: server, Name: "contacts"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close() })
+	ctx := context.Background()
+	before, err := p.Inventory(ctx)
+	require.NoError(t, err)
+
+	gv, err := p.RefreshGolden(ctx, provider.GoldenSpec{
+		SourceURL: secrets.New("mysql://" + u.User.String() + "@" + u.Host + "/" + srcName +
+			"?tls=true"),
+		RulesHash: "rules-tls", Provenance: "project:contacts",
+		Verify: func(context.Context, secrets.Value) (string, error) { return "clean", nil },
+	})
+	if err == nil {
+		t.Cleanup(func() { _ = p.DestroyGolden(context.Background(), gv.ID) })
+	}
+	require.ErrorContains(t, err, "AF-DB-046")
+	require.ErrorContains(t, err, u.Hostname())
+	password, _ := u.User.Password()
+	if password != "" {
+		require.NotContains(t, err.Error(), password)
+	}
+	after, err := p.Inventory(ctx)
+	require.NoError(t, err)
+	require.Equal(t, len(before), len(after), "a refused source still made something")
+}

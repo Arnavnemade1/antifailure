@@ -3,16 +3,21 @@ package mysql
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
 
 	driver "github.com/go-sql-driver/mysql"
 
+	aferrors "github.com/antifailure/antifailure/engine/internal/errors"
 	"github.com/antifailure/antifailure/engine/internal/secrets"
 )
 
@@ -34,19 +39,30 @@ type server struct {
 	password string
 	addr     string
 	database string
-	// tls is the driver's tls setting: "preferred" unless the URL says
-	// otherwise. See parseURL.
+	// tls is the driver's tls setting. See parseURL for how it is chosen.
 	tls string
+	// tlsStated reports that the URL said tls= itself, rather than the mode
+	// being this package's default for the host.
+	tlsStated bool
 }
 
 // parseURL reads a mysql:// address.
 //
-// tls is taken from the query and nothing else is. Preferred is the default,
-// which uses TLS whenever the server offers it and does not verify the
-// certificate: a production MySQL is usually reached over a network somebody
-// else runs, a server with no certificate must still be readable, and
-// tls=true is there for whoever wants verification and has a certificate a
-// verifier would accept.
+// tls is taken from the query and nothing else is. With no tls= the mode
+// depends on the host. A host on another machine gets verified TLS, tls=true,
+// and a server that cannot provide it is refused with AF-DB-046 naming the
+// host. A source is production: the connection carries production's
+// credential and its unmasked rows, and preferred, the driver's own default,
+// neither checks the certificate nor refuses a plaintext connection, so anyone
+// on the path would read both. It used to be the default here, and MySQL
+// support was new enough that nobody relied on it.
+//
+// A loopback host, and the managed store server's own name, default to
+// preferred: a local server usually has no certificate a verifier would
+// accept, and nothing between it and this process is somebody else's network.
+//
+// An explicit tls=preferred, skip-verify or false is the author's stated
+// choice and is honoured. af explain says which mode a source is using.
 func parseURL(v secrets.Value) (*server, error) {
 	raw := strings.TrimSpace(v.Reveal())
 	u, err := url.Parse(raw)
@@ -55,7 +71,7 @@ func parseURL(v secrets.Value) (*server, error) {
 		return nil, fmt.Errorf(
 			"datastore.mysql: the address is not a mysql://user:password@host:port/database URL")
 	}
-	s := &server{tls: "preferred"}
+	s := &server{}
 	if u.User != nil {
 		s.user = u.User.Username()
 		s.password, _ = u.User.Password()
@@ -73,13 +89,108 @@ func parseURL(v secrets.Value) (*server, error) {
 	}
 	switch mode := u.Query().Get("tls"); mode {
 	case "":
+		s.tls = defaultTLS(host)
 	case "true", "false", "skip-verify", "preferred":
-		s.tls = mode
+		s.tls, s.tlsStated = mode, true
 	default:
 		return nil, fmt.Errorf(
 			"datastore.mysql: tls=%s is not one of true, false, skip-verify or preferred", mode)
 	}
 	return s, nil
+}
+
+// defaultTLS is the mode a URL with no tls= gets for its host: preferred on
+// this machine and on the managed store server, verified everywhere else.
+func defaultTLS(host string) string {
+	if isLocalHost(host) {
+		return "preferred"
+	}
+	return "true"
+}
+
+// isLocalHost reports a host whose traffic never crosses a network somebody
+// else runs: loopback by name or by address, or the managed server.
+func isLocalHost(host string) bool {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") || h == LocalServerName {
+		return true
+	}
+	if ip, err := netip.ParseAddr(strings.Trim(h, "[]")); err == nil {
+		return ip.Unmap().IsLoopback()
+	}
+	return false
+}
+
+// TLSMode describes how a mysql:// address will be connected to, for af
+// explain: the mode, whether the address chose it or this package did, and a
+// sentence a person can act on. It never quotes the address. ok is false for
+// a value that is not a mysql:// address at all.
+func TLSMode(v secrets.Value) (mode string, stated bool, sentence string, ok bool) {
+	s, err := parseURL(v)
+	if err != nil {
+		return "", false, "", false
+	}
+	host, _, _ := net.SplitHostPort(s.addr)
+	why := "the default for " + host
+	if s.tlsStated {
+		why = "as the address says"
+	}
+	switch s.tls {
+	case "true":
+		sentence = "verified TLS, " + why + ": the certificate must be one this machine trusts " +
+			"for " + host + ", or the refresh is refused"
+	case "preferred":
+		sentence = "tls=preferred, " + why + ": encrypted only if the server offers it and the " +
+			"certificate is never checked, so anyone on the path can read the credential and " +
+			"the unmasked rows"
+	case "skip-verify":
+		sentence = "tls=skip-verify, " + why + ": encrypted, but the certificate is never " +
+			"checked, so anyone on the path can impersonate the server and read the credential " +
+			"and the unmasked rows"
+	case "false":
+		sentence = "tls=false, " + why + ": not encrypted, so anyone on the path can read the " +
+			"credential and the unmasked rows"
+	}
+	return s.tls, s.tlsStated, sentence, true
+}
+
+// refuseUnverified turns a failed verified connection into AF-DB-046, naming
+// the host and the way out, and passes every other error through.
+//
+// The driver's own words for these are a certificate chain or "TLS requested
+// but server does not support TLS", neither of which says that the mode was
+// chosen on the reader's behalf or how to choose another.
+func (s *server) refuseUnverified(err error) error {
+	if err == nil || s.tls != "true" || !isTLSFailure(err) {
+		return err
+	}
+	host, _, _ := net.SplitHostPort(s.addr)
+	return aferrors.Coded(aferrors.AFDB046, "host", host, "detail", firstLine(err.Error()))
+}
+
+// isTLSFailure reports an error from negotiating or verifying TLS.
+func isTLSFailure(err error) bool {
+	if errors.Is(err, driver.ErrNoTLS) {
+		return true
+	}
+	var unknown x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	var verify *tls.CertificateVerificationError
+	var record tls.RecordHeaderError
+	if errors.As(err, &unknown) || errors.As(err, &hostname) || errors.As(err, &invalid) ||
+		errors.As(err, &verify) || errors.As(err, &record) {
+		return true
+	}
+	return strings.HasPrefix(err.Error(), "tls: ") || strings.Contains(err.Error(), "x509: ")
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }
 
 // DatabaseOf returns the database a mysql:// address names, and empty when it
@@ -107,7 +218,12 @@ func (s *server) url() secrets.Value {
 		Host:   s.addr,
 		Path:   "/" + s.database,
 	}
-	if s.tls != "preferred" {
+	// Written out unless it is what this host gets anyway, so the address
+	// reads back as the same mode. Left off in the common case because the
+	// branch address is handed to an application's own driver, and several
+	// refuse a parameter they do not know.
+	host, _, _ := net.SplitHostPort(s.addr)
+	if s.tls != defaultTLS(host) {
 		u.RawQuery = "tls=" + s.tls
 	}
 	return secrets.New(u.String())

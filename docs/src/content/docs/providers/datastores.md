@@ -104,15 +104,29 @@ datastores:
 ```
 
 The variable holds `mysql://user:password@host:port/database`. A password
-holding `@`, `/` or `:` is percent encoded, as in any URL. Add `?tls=true` to
-verify the server's certificate; the default uses TLS whenever the server
-offers it without verifying it, and `tls=false` turns it off. That default is
-the driver's `tls=preferred`, which falls back to an unencrypted connection
-when the server offers no TLS and accepts any certificate when it does, so a
-source reached over a network you do not control should say `?tls=true`. The
-user needs `SELECT` on the database. Any other form of address, a `mariadb://`
-URL, a `jdbc:` URL or a Go driver DSN, is refused rather than read as no
-source, so a typo cannot publish an empty golden that looks like a full one.
+holding `@`, `/` or `:` is percent encoded, as in any URL. The user needs
+`SELECT` on the database. Any other form of address, a `mariadb://` URL, a
+`jdbc:` URL or a Go driver DSN, is refused rather than read as no source, so a
+typo cannot publish an empty golden that looks like a full one.
+
+The source connection carries production's credential and its unmasked rows,
+so a source on another machine is reached over verified TLS unless the
+address says otherwise: with no `tls=`, the server must present a certificate
+this machine trusts for that host name, and a server that cannot is refused
+with AF-DB-046 naming the host. A server on this machine, `localhost` or a
+loopback address, defaults to `tls=preferred` instead, because a local server
+rarely has such a certificate and its traffic crosses nobody else's network.
+To accept the risk for a remote source, write the mode into the address:
+
+| `tls=` | What it does | What it exposes |
+| :- | :- | :- |
+| `true` | Verified TLS. The default for a remote host. | Nothing on the path. |
+| `preferred` | TLS when the server offers it, certificate never checked. | A plaintext downgrade or an impostor reads the credential and the rows. |
+| `skip-verify` | TLS, certificate never checked. | An impostor reads the credential and the rows. |
+| `false` | No TLS. | Anyone on the path reads the credential and the rows. |
+
+`af explain` prints the mode each MySQL source will use, and whether the
+address chose it or the default did, without printing the address.
 
 A refresh reads every table inside one read only transaction, the way
 `mysqldump --single-transaction` does, so the golden is production at one

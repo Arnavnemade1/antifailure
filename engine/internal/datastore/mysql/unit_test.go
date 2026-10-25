@@ -1,10 +1,17 @@
 package mysql
 
 import (
+	"context"
+	"crypto/x509"
+	"errors"
+	"fmt"
 	"testing"
+
+	driver "github.com/go-sql-driver/mysql"
 
 	"github.com/stretchr/testify/require"
 
+	aferrors "github.com/antifailure/antifailure/engine/internal/errors"
 	"github.com/antifailure/antifailure/engine/internal/masking"
 	"github.com/antifailure/antifailure/engine/internal/secrets"
 	"github.com/antifailure/antifailure/engine/pkg/provider"
@@ -18,7 +25,7 @@ func TestParseURL_ReadsWhatAManifestWrites(t *testing.T) {
 	require.Equal(t, "s3cret", s.password)
 	require.Equal(t, "db.internal:3307", s.addr)
 	require.Equal(t, "shop", s.database)
-	require.Equal(t, "preferred", s.tls)
+	require.Equal(t, "true", s.tls, "a host on another machine defaults to verified TLS")
 
 	s, err = parseURL(secrets.New("mysql://app@db.internal/shop?tls=true"))
 	require.NoError(t, err)
@@ -156,7 +163,7 @@ func TestOpenSource_RefusesAnAddressItCannotReadWithoutQuotingIt(t *testing.T) {
 	t.Parallel()
 	p := &Provider{}
 	for _, none := range []string{"", "  ", "antifailure://conformance/source"} {
-		src, err := p.openSource(secrets.New(none))
+		src, err := p.openSource(context.Background(), secrets.New(none))
 		require.NoError(t, err, none)
 		require.Nil(t, src, none)
 	}
@@ -166,11 +173,116 @@ func TestOpenSource_RefusesAnAddressItCannotReadWithoutQuotingIt(t *testing.T) {
 		"u:hunter2@tcp(db.internal:3306)/shop",
 		"postgres://u:hunter2@db.internal/shop",
 	} {
-		src, err := p.openSource(secrets.New(bad))
+		src, err := p.openSource(context.Background(), secrets.New(bad))
 		require.Nil(t, src, bad)
 		require.ErrorContains(t, err, "not a mysql:// URL", bad)
 		require.NotContains(t, err.Error(), "hunter2", "an error repeated the credential in %q", bad)
 	}
-	_, err := p.openSource(secrets.New("mysql://u:hunter2@db.internal:3306/"))
+	_, err := p.openSource(context.Background(), secrets.New("mysql://u:hunter2@db.internal:3306/"))
 	require.ErrorContains(t, err, "names no database")
+}
+
+// A source on another machine carries production's credential and unmasked
+// rows, so with no tls= it is verified TLS. preferred would accept a
+// plaintext downgrade and any certificate.
+func TestParseURL_AHostOnAnotherMachineDefaultsToVerifiedTLS(t *testing.T) {
+	t.Parallel()
+	for _, host := range []string{
+		"db.internal", "prod.example.com:3307", "10.0.0.5", "[2001:db8::1]:3306",
+		"localhost.example.com", "128.0.0.1",
+	} {
+		s, err := parseURL(secrets.New("mysql://app:pw@" + host + "/shop"))
+		require.NoError(t, err, host)
+		require.Equal(t, "true", s.tls, host)
+		require.False(t, s.tlsStated, host)
+		// And it reads back as the same mode from the address it renders.
+		back, err := parseURL(s.url())
+		require.NoError(t, err)
+		require.Equal(t, "true", back.tls, host)
+	}
+}
+
+// A weaker mode written in the address is the author's stated choice.
+func TestParseURL_AnExplicitOptOutIsHonoured(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"preferred", "skip-verify", "false", "true"} {
+		s, err := parseURL(secrets.New("mysql://app:pw@db.internal/shop?tls=" + mode))
+		require.NoError(t, err, mode)
+		require.Equal(t, mode, s.tls)
+		require.True(t, s.tlsStated, mode)
+		back, err := parseURL(s.url())
+		require.NoError(t, err)
+		require.Equal(t, mode, back.tls, "the rendered address lost the stated mode %s", mode)
+	}
+}
+
+// A server on this machine, or the managed store server, usually has no
+// certificate a verifier would accept, and nothing between here and it is
+// another network, so it defaults to preferred.
+func TestParseURL_LoopbackDefaultsToPreferred(t *testing.T) {
+	t.Parallel()
+	for _, host := range []string{
+		"127.0.0.1:3306", "127.5.5.5", "[::1]:3306", "localhost", "LOCALHOST:3306",
+		"db.localhost", "af-mysql:3306", "[::ffff:127.0.0.1]:3306",
+	} {
+		s, err := parseURL(secrets.New("mysql://root:pw@" + host + "/"))
+		require.NoError(t, err, host)
+		require.Equal(t, "preferred", s.tls, host)
+		require.NotContains(t, s.url().Reveal(), "tls=",
+			"a default is not written into the branch address an application is handed")
+	}
+	s, err := parseURL(secrets.New("mysql://root:pw@127.0.0.1/?tls=true"))
+	require.NoError(t, err)
+	require.Equal(t, "true", s.tls, "loopback is a default, not a ceiling")
+}
+
+// A verified connection that fails is AF-DB-046, naming the host and the way
+// out and never the credential. Anything else passes through unchanged.
+func TestRefuseUnverified_NamesTheHostAndTheOptOut(t *testing.T) {
+	t.Parallel()
+	s, err := parseURL(secrets.New("mysql://app:hunter2@db.internal/shop"))
+	require.NoError(t, err)
+	for _, cause := range []error{
+		fmt.Errorf("reaching the source: %w", driver.ErrNoTLS),
+		fmt.Errorf("reaching the source: %w", x509.UnknownAuthorityError{}),
+		errors.New("tls: first record does not look like a TLS handshake"),
+	} {
+		got := s.refuseUnverified(cause)
+		require.ErrorContains(t, got, "AF-DB-046", cause.Error())
+		require.ErrorContains(t, got, "db.internal")
+		var coded *aferrors.Error
+		require.ErrorAs(t, got, &coded)
+		require.Contains(t, coded.NextStep(), "?tls=preferred")
+		require.NotContains(t, got.Error(), "hunter2")
+	}
+	plain := errors.New("dial tcp: connection refused")
+	require.Same(t, plain, s.refuseUnverified(plain))
+
+	weak, err := parseURL(secrets.New("mysql://app:pw@db.internal/shop?tls=skip-verify"))
+	require.NoError(t, err)
+	tlsErr := fmt.Errorf("x: %w", driver.ErrNoTLS)
+	require.Same(t, tlsErr, weak.refuseUnverified(tlsErr),
+		"a mode the author chose is not reported as one chosen for them")
+}
+
+// af explain says which mode a source uses, and that a weak one exposes the
+// credential, without ever quoting the address.
+func TestTLSMode_SaysWhatTheWeakModesExpose(t *testing.T) {
+	t.Parallel()
+	mode, stated, sentence, ok := TLSMode(secrets.New("mysql://app:hunter2@db.internal/shop"))
+	require.True(t, ok)
+	require.Equal(t, "true", mode)
+	require.False(t, stated)
+	require.Contains(t, sentence, "the default for db.internal")
+	for _, weak := range []string{"preferred", "skip-verify", "false"} {
+		mode, stated, sentence, ok := TLSMode(secrets.New(
+			"mysql://app:hunter2@db.internal/shop?tls=" + weak))
+		require.True(t, ok)
+		require.Equal(t, weak, mode)
+		require.True(t, stated)
+		require.Contains(t, sentence, "read the credential", weak)
+		require.NotContains(t, sentence, "hunter2")
+	}
+	_, _, _, ok = TLSMode(secrets.New("mariadb://app:hunter2@db.internal/shop"))
+	require.False(t, ok)
 }

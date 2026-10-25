@@ -16,6 +16,12 @@ position. Views, triggers, stored routines and events are not copied, and a
 refresh names every view it left out. A branch is a full copy rather than
 shared storage, so it takes longer the larger the golden is.
 
+A source on another machine is reached over verified TLS by default, and a
+server that cannot present a certificate this machine trusts is refused by
+name with AF-DB-046. `?tls=preferred`, `?tls=skip-verify` or `?tls=false` in
+the address accepts the risk explicitly, a source on this machine defaults to
+`preferred`, and `af explain` prints which mode each source uses.
+
 The source must be a `mysql://` URL. Any other form, a `mariadb://` URL or a
 driver DSN, is refused rather than read as no source, and a column no rule
 covered that the scan cannot read, such as non UTF-8 bytes in a column named
