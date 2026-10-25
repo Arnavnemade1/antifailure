@@ -196,6 +196,21 @@ func TestEmail_IsCaseInsensitiveLikeARealMailbox(t *testing.T) {
 		"two rows differing only in case are the same mailbox and must map together")
 }
 
+func TestEmail_IsCaseInsensitiveWithAPlusTagToo(t *testing.T) {
+	t.Parallel()
+	// The tag was derived from the address as written while the local part was
+	// derived from it lowercased, so these two masked to the same local part
+	// and different tags: two mailboxes where the source had one, and a join on
+	// email between a table that stores it as typed and one that stores it
+	// lowercased stopped matching for every plus address.
+	lower := apply(t, "email", col("users", "email"), "person+newsletter@example.com")
+	upper := apply(t, "email", col("users", "email"), "Person+Newsletter@Example.COM")
+	require.Equal(t, lower, upper,
+		"two rows differing only in case are the same mailbox and must map together")
+	padded := apply(t, "email", col("users", "email"), " person+newsletter@example.com ")
+	require.Equal(t, lower, padded, "surrounding space changed the tag but not the local part")
+}
+
 func TestEmail_KeepsPlusAddressing(t *testing.T) {
 	t.Parallel()
 	// Plus addressing is often load bearing in a sign up flow, and losing it

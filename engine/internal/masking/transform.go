@@ -133,14 +133,19 @@ func (emailTransform) Apply(k *Key, c Column, in *string) (*string, error) {
 	// The local part is derived from the address lowercased, so that two rows
 	// differing only in case map to the same masked address, which is how the
 	// real system treats them.
-	h := prf(sub, strings.ToLower(strings.TrimSpace(*in)))
+	normalized := strings.ToLower(strings.TrimSpace(*in))
+	h := prf(sub, normalized)
 	local := base32Encode(h, 13)
 
 	// A plus tag in the original is kept as a distinct tag rather than
 	// dropped, because plus addressing is often load bearing in a sign up
 	// flow and losing it changes what the application does.
-	if plus := strings.IndexByte(*in, '+'); plus >= 0 && plus < strings.LastIndexByte(*in, '@') {
-		tag := base32Encode(prf(sub, "tag:"+*in), 4)
+	//
+	// From the same normalized address as the local part. It was derived from
+	// the address as written, so `Person+Tag@` and `person+tag@` kept one local
+	// part and got two tags, which is two mailboxes where there was one.
+	if plus := strings.IndexByte(normalized, '+'); plus >= 0 && plus < strings.LastIndexByte(normalized, '@') {
+		tag := base32Encode(prf(sub, "tag:"+normalized), 4)
 		local += "+" + tag
 	}
 	return str(local + "@" + syntheticDomain), nil
