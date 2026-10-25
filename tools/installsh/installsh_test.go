@@ -167,7 +167,7 @@ func (s *session) run() (string, error) {
 	if s.wgetOnly && onPathIn(s.path, "curl") {
 		s.t.Fatal("curl is reachable again in a session that removed it, so the wget half of the installer is not what this ran")
 	}
-	cmd := exec.Command("/bin/sh", "-c", "cat "+filepath.Join(s.root, "install.sh")+" | sh")
+	cmd := pipedInstall(s.t, s.root)
 	cmd.Env = s.environ()
 	out, err := cmd.CombinedOutput()
 	assertNoRawToolErrorReachedTheReader(s.t, string(out))
@@ -188,6 +188,26 @@ func (s *session) environ() []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// pipedInstall is `cat install.sh | sh` for the install.sh under root.
+//
+// The path is handed to the shell as an argument rather than pasted into the
+// command. Pasted, a checkout under a directory with a space in its name, which
+// is every checkout under macOS's "Application Support", gave cat two paths that
+// did not exist; cat failed, sh read an empty script and exited 0, and every
+// install() in this package "succeeded" having run nothing. The tests that look
+// for a file then failed for a reason that had nothing to do with the
+// installer, and any that only looked for an absence passed without testing
+// anything. The stat is for the same silence: a pipeline reports the status of
+// its last command, so a script that is not there is otherwise a clean run.
+func pipedInstall(t *testing.T, root string) *exec.Cmd {
+	t.Helper()
+	script := filepath.Join(root, "install.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("there is no installer to run: %v", err)
+	}
+	return exec.Command("/bin/sh", "-c", `cat "$1" | sh`, "sh", script)
 }
 
 // assertNoRawToolErrorReachedTheReader is checked on EVERY invocation, and that
@@ -770,12 +790,36 @@ func TestGithubActionsGetsPathForLaterStepsAndKeepsItsProfile(t *testing.T) {
 	}
 }
 
+// The installer is fed to sh from wherever the checkout is, and that can be
+// a directory whose name has a space in it. This one runs it from such a copy
+// and needs af to exist afterwards, which an empty script piped into sh cannot
+// produce.
+func TestTheHarnessRunsTheInstallerFromAPathWithASpace(t *testing.T) {
+	s := newSession(t)
+	checkout := filepath.Join(t.TempDir(), "a checkout with spaces")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join(s.root, "install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "install.sh"), script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.root = checkout
+	out := s.install()
+	if _, err := os.Stat(filepath.Join(s.binDir(), "af")); err != nil {
+		t.Fatalf("the installer did not run from %q, although the run reported success: %v\n%s", checkout, err, out)
+	}
+}
+
 // AF_PREFIX with no HOME is an ordinary shape inside a container, and the
 // script dereferences HOME in several places that have to survive it.
 func TestNoHomeStillInstalls(t *testing.T) {
 	s := newSession(t)
 	prefix := filepath.Join(t.TempDir(), "opt", "af")
-	cmd := exec.Command("/bin/sh", "-c", "cat "+filepath.Join(s.root, "install.sh")+" | sh")
+	cmd := pipedInstall(t, s.root)
 	cmd.Env = []string{
 		"PATH=" + s.path,
 		"AF_VERSION=" + version,
