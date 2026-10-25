@@ -9,6 +9,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { trimTrailingSlashes } from '../src/trailingslash.ts'
 
 describe('trimTrailingSlashes', () => {
@@ -22,7 +23,7 @@ describe('trimTrailingSlashes', () => {
 
 describe('the api source', () => {
   test('carries no end anchored slash replace, only trimTrailingSlashes', () => {
-    const root = new URL('../src/', import.meta.url).pathname
+    const root = fileURLToPath(new URL('../src/', import.meta.url))
     const found: string[] = []
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir)) {

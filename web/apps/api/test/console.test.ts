@@ -10,9 +10,10 @@
 import { after, before, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { CONSOLE_CSP, consoleCsp } from '../src/console/index.ts'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { copyFile, mkdtemp, mkdir, realpath, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { available, seedOrg, signInAs, startApi, type ApiHarness, type Org } from './harness.ts'
 import { Keyring } from '../src/providers/seal.ts'
 
@@ -35,6 +36,43 @@ async function fakeBuild(): Promise<string> {
   await writeFile(join(dir, '_next', 'static', 'chunks', 'main-abc123.js'), 'console.log(1)')
   return dir
 }
+
+describe('where the console build is looked for by default', () => {
+  test('a directory with a space in its name is read as that directory', async () => {
+    // The default is worked out from the module's own URL, so the module is
+    // copied under a directory whose name has a space and imported from there.
+    // `.pathname` on that URL is still percent encoded, and the build was
+    // looked for under `with%20space`, which does not exist, so every page
+    // said there was no console. Copied rather than read where it stands, so
+    // the test does not depend on where the checkout happens to live.
+    // realpath because the module is loaded by its real path, and on macOS the
+    // temporary directory is a symbolic link into /private.
+    const tmp = await realpath(await mkdtemp(join(tmpdir(), 'af-console-dir-')))
+    try {
+      const app = join(tmp, 'with space', 'app')
+      await mkdir(join(app, 'apps', 'api', 'src', 'console'), { recursive: true })
+      const source = new URL('../src/', import.meta.url)
+      await copyFile(new URL('console/static.ts', source), join(app, 'apps', 'api', 'src', 'console', 'static.ts'))
+      await copyFile(new URL('trailingslash.ts', source), join(app, 'apps', 'api', 'src', 'trailingslash.ts'))
+      await mkdir(join(app, 'console-out'))
+      await writeFile(join(app, 'console-out', 'index.html'), '<!doctype html><title>index</title>')
+
+      const copied = pathToFileURL(join(app, 'apps', 'api', 'src', 'console', 'static.ts')).href
+      const { findConsoleBuild } = (await import(copied)) as typeof import('../src/console/static.ts')
+      const saved = process.env.AF_CONSOLE_DIR
+      delete process.env.AF_CONSOLE_DIR
+      try {
+        const build = await findConsoleBuild()
+        assert.equal(build.dir, join(app, 'console-out'))
+        assert.equal(build.present, true, build.summary)
+      } finally {
+        if (saved !== undefined) process.env.AF_CONSOLE_DIR = saved
+      }
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  })
+})
 
 const ok = await available()
 
