@@ -204,8 +204,19 @@ trap 'rm -rf "$tmp"' EXIT
 trap '{ abandon || :; }; trap - EXIT INT; kill -INT $$' INT
 trap '{ abandon || :; }; trap - EXIT TERM; kill -TERM $$' TERM
 placing=""
+renaming=""
 abandon() {
   rm -rf "$tmp"
+  # The rename that puts af in place and the line that clears placing are two
+  # commands, and a trap runs between commands, so a signal can arrive with af
+  # already replaced and placing still set. Rolling the runner back then would
+  # pair the old runner with the new af. Once the rename has begun, the
+  # temporary af still existing is what says it did not complete: mv consumes
+  # it on success and leaves it on failure.
+  if [ -n "$placing" ] && [ -n "$renaming" ] && [ ! -e "$BIN_DIR/.af.new.$$" ]; then
+    placing=""
+    [ -z "$runner_aside" ] || rm -rf "$runner_aside"
+  fi
   [ -n "$placing" ] || return 0
   rm -f "$BIN_DIR/.af.new.$$"
   if [ -e "$staged" ]; then
@@ -535,7 +546,7 @@ fi
 # old one, so the old af stays whole until the new one is complete. A rename
 # within a directory is atomic, and a running af keeps the file it opened.
 if ! { cp "$tmp/$name/af" "$BIN_DIR/.af.new.$$" && chmod 0755 "$BIN_DIR/.af.new.$$" \
-       && mv -f "$BIN_DIR/.af.new.$$" "$BIN_DIR/af"; } 2>/dev/null; then
+       && renaming=1 && mv -f "$BIN_DIR/.af.new.$$" "$BIN_DIR/af"; } 2>/dev/null; then
   rm -f "$BIN_DIR/.af.new.$$"
   restore_runner
   die "af could not be written to $BIN_DIR, so nothing was installed; check that you can write to it, or set AF_PREFIX to somewhere you can"

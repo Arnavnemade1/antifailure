@@ -177,3 +177,82 @@ func TestAnInterruptedUpgradeLeavesTheOldInstall(t *testing.T) {
 		}
 	}
 }
+
+// The rename that puts af in place and the line after it that says the
+// placement is over are two commands, and the shell runs a trap between
+// commands. An interrupt landing between them found af already replaced and
+// the placement still marked as under way, so it put the old runner back
+// beside the new af: an install that had in fact completed was left as a pair
+// that never shipped together.
+//
+// This mv performs the rename, says so, and then waits for the interrupt and
+// reports success, which is the exact window: the rename has happened and the
+// script has not yet run its next line.
+func TestAnInterruptAfterAfIsPlacedKeepsTheNewInstall(t *testing.T) {
+	s := newSession(t)
+	s.install()
+
+	share := filepath.Join(s.home, ".antifailure", "share", "antifailure")
+	marker := filepath.Join(share, "runner", "OLD")
+	if err := os.WriteFile(marker, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	af := filepath.Join(s.binDir(), "af")
+	if err := os.WriteFile(af, []byte("#!/bin/sh\necho old\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	reached := filepath.Join(t.TempDir(), "reached")
+	wrapper := "#!/bin/sh\n" +
+		"for a in \"$@\"; do\n" +
+		"  case \"$a\" in */.af.new.*)\n" +
+		"    " + realTool(t, "mv") + " \"$@\" || exit $?\n" +
+		"    sleep 30 >/dev/null 2>&1 &\n" +
+		"    trap 'kill $! 2>/dev/null; exit 0' INT\n" +
+		"    : > '" + reached + "'\n" +
+		"    wait\n" +
+		"    exit 0 ;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"exec " + realTool(t, "mv") + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(s.stubs, "mv"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan string, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			if _, err := os.Stat(reached); err == nil {
+				ready <- reached
+				return
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}()
+
+	out, status := s.interrupted(ready)
+
+	if !status.Signaled() || status.Signal() != syscall.SIGINT {
+		t.Errorf("an interrupted install should die of the interrupt; it ended with %v:\n%s", status, out)
+	}
+	if body, _ := os.ReadFile(af); string(body) == "#!/bin/sh\necho old\n" {
+		t.Fatalf("this test did not reach its window: af was never replaced:\n%s", out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Errorf("the old runner was put back beside the new af after an interrupt that arrived once af was in place")
+	}
+	entries, err := os.ReadDir(share)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "runner" {
+			t.Errorf("an install interrupted once af was in place left %s behind in %s", e.Name(), share)
+		}
+	}
+}
