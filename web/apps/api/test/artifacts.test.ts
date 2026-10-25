@@ -87,6 +87,9 @@ describe('what an upload may declare', () => {
     ['a control character in the workflow', { 'x-artifact-workflow': encodeURIComponent('a\nb') }, 400, 'workflow'],
     ['a video that says it is HTML', { 'content-type': 'text/html' }, 415, 'content_type'],
     ['a screenshot type for a video', { 'content-type': 'image/png' }, 415, 'content_type'],
+    // The only JPEG the runner makes is a live view frame, which must never
+    // be stored here, so a screenshot is a PNG or it is refused.
+    ['a JPEG screenshot', { 'x-artifact-kind': 'screenshot', 'content-type': 'image/jpeg' }, 415, 'content_type'],
     ['no Content-Length', { 'content-length': '' }, 411, 'length'],
     ['an empty body', { 'content-length': '0' }, 400, 'length'],
     ['a video over its ceiling', { 'content-length': String(KIND_POLICIES.video.maxBytes + 1) }, 413, 'too_large'],
@@ -120,7 +123,6 @@ describe('whether bytes are the type they claim', () => {
     assert.ok(bytesMatchType(webm(64), 'video/webm'))
     assert.ok(bytesMatchType(png(64), 'image/png'))
     assert.ok(bytesMatchType(zip(64), 'application/zip'))
-    assert.ok(bytesMatchType(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]), 'image/jpeg'))
     const mp4 = Buffer.alloc(16)
     mp4.set([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70], 0)
     assert.ok(bytesMatchType(mp4, 'video/mp4'))
@@ -134,7 +136,6 @@ describe('whether bytes are the type they claim', () => {
   })
 
   it('refuses a real file under the wrong one of its kind\'s types', () => {
-    assert.equal(bytesMatchType(png(64), 'image/jpeg'), false)
     assert.equal(bytesMatchType(webm(64), 'video/mp4'), false)
   })
 })

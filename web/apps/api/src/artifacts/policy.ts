@@ -50,9 +50,12 @@ export const KIND_POLICIES: Readonly<Record<ArtifactKind, KindPolicy>> = {
       'ceiling matches the video beside it so that a run is never kept with one and not the other.',
   },
   screenshot: {
-    contentTypes: ['image/png', 'image/jpeg'],
+    // PNG only, which is the one type the runner writes a workflow screenshot
+    // as. The only JPEG it makes is a live view frame, and those never reach
+    // the control plane, so a JPEG arriving here is not a screenshot.
+    contentTypes: ['image/png'],
     maxBytes: 8 * MiB,
-    extensions: { 'image/png': 'png', 'image/jpeg': 'jpg' },
+    extensions: { 'image/png': 'png' },
     inline: true,
     reason:
       'A full page PNG of a long page at device scale two is the largest a screenshot honestly gets, ' +
@@ -188,8 +191,6 @@ export function bytesMatchType(bytes: Uint8Array, contentType: string): boolean 
       return starts(0x50, 0x4b, 0x03, 0x04) || starts(0x50, 0x4b, 0x05, 0x06) // local header, or empty archive
     case 'image/png':
       return starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
-    case 'image/jpeg':
-      return starts(0xff, 0xd8, 0xff)
     default:
       return false
   }

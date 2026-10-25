@@ -14039,7 +14039,7 @@ One file of each kind per workflow:
 | --- | --- | --- |
 | Video | WebM, MP4 | 64 MiB |
 | Trace | Playwright trace, as a ZIP | 64 MiB |
-| Screenshot | PNG, JPEG | 8 MiB |
+| Screenshot | PNG | 8 MiB |
 
 A file is sent only if it is a regular file inside the environment's artifacts
 directory once symlinks are resolved. A path that points anywhere else is

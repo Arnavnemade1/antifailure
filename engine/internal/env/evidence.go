@@ -47,9 +47,14 @@ var evidenceLimits = map[string]int64{
 
 // evidenceTypes are the content types each kind may be, by file extension.
 var evidenceTypes = map[string]map[string]string{
-	"video":      {".webm": "video/webm", ".mp4": "video/mp4"},
-	"trace":      {".zip": "application/zip"},
-	"screenshot": {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"},
+	"video": {".webm": "video/webm", ".mp4": "video/mp4"},
+	"trace": {".zip": "application/zip"},
+	// PNG only. The runner writes every workflow screenshot as a PNG, and the
+	// only JPEG it ever makes is a live view frame, which must never reach the
+	// control plane. The boundary test in internal/live refuses the JPEG
+	// content type anywhere in this package for that reason, and it scans
+	// comments too, so this one does not name the type or the test.
+	"screenshot": {".png": "image/png"},
 }
 
 // evidenceFile is one file a workflow recorded, checked and ready to send.
