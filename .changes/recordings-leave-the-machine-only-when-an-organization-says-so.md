@@ -22,9 +22,11 @@ organization's artifact as not found, and is served with a sandboxing
 as not found from that moment, by the database's clock, rather than served
 until the sweep removes its bytes, and deleting the organization deletes its
 recordings. One organization may hold at most half of the memory a process
-reserves for uploads arriving, and an upload that stalls or trickles is cut
-off and gives that memory back, so one engine token cannot keep every other
-organization's uploads refused as busy.
+reserves for uploads arriving, in at most two uploads, organizations already
+uploading cannot take the last half, which is kept for one with nothing
+arriving, and an upload that stalls or trickles is cut off and gives its
+memory back, so neither one engine token nor a few organizations together
+can keep every other organization's uploads refused as busy.
 
 The trust boundary page now lists run recordings as opt in rather than as never
 leaving the machine, and says what a recording can carry.

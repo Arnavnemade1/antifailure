@@ -15,7 +15,8 @@ import {
   ArtifactRefusal, KIND_POLICIES, bytesMatchType, contentDisposition, parseRange, readDeclaration,
 } from '../src/artifacts/policy.ts'
 import {
-  ByteBudget, DEFAULT_IN_FLIGHT_BYTES, DEFAULT_ORG_IN_FLIGHT_BYTES, DEFAULT_ORG_QUOTA_BYTES,
+  ByteBudget, DEFAULT_IN_FLIGHT_BYTES, DEFAULT_ORG_IN_FLIGHT_BYTES, DEFAULT_ORG_IN_FLIGHT_UPLOADS,
+  DEFAULT_ORG_QUOTA_BYTES,
   OrgByteBudgets, artifactQuotaBytesFrom, readExactly,
 } from '../src/artifacts/routes.ts'
 import { ArtifactStores } from '../src/artifacts/store.ts'
@@ -220,12 +221,12 @@ describe('reading exactly the declared body', () => {
     } as RequestInit)
     const began = Date.now()
     await assert.rejects(
-      readExactly(stalled, 10, 3000, { idleMs: 150, minBytesPerSecond: 0, graceMs: 60_000 }),
+      readExactly(stalled, 10, 3000, { idleMs: 150, minBytesPerSecond: 0 }),
       (err: unknown) => err instanceof ArtifactRefusal && err.code === 'too_slow' && /No part/.test(err.message))
     assert.ok(Date.now() - began < 2000, `took ${Date.now() - began} ms against an idle timeout of 150`)
   })
 
-  it('cuts off a body that keeps trickling below the minimum rate', async () => {
+  it('cuts off a body that trickles below the minimum rate, measured from its first byte', async () => {
     let timer: NodeJS.Timeout | undefined
     const trickle = new Request('http://x.test/', {
       method: 'POST',
@@ -239,19 +240,23 @@ describe('reading exactly the declared body', () => {
     const began = Date.now()
     try {
       await assert.rejects(
-        readExactly(trickle, 100_000, 3000, { idleMs: 1000, minBytesPerSecond: 1000, graceMs: 100 }),
+        readExactly(trickle, 100_000, 3000, { idleMs: 1000, minBytesPerSecond: 1000 }),
         (err: unknown) => err instanceof ArtifactRefusal && err.code === 'too_slow' && /more slowly/.test(err.message))
     } finally {
       clearInterval(timer)
     }
-    assert.ok(Date.now() - began < 2500, `took ${Date.now() - began} ms`)
+    // From the start, so the first check, a quarter of the idle timeout in,
+    // already finds it short. A grace period before the rate applied would
+    // let it run to the 3 second deadline and be named for that instead.
+    assert.ok(Date.now() - began < 1500, `took ${Date.now() - began} ms`)
   })
 })
 
 describe('the share of the in-flight budget one organization may hold', () => {
-  it('is one reservation of the largest kind, half the process budget', () => {
+  it('is one reservation of the largest kind, half the process budget, in at most two uploads', () => {
     assert.equal(DEFAULT_ORG_IN_FLIGHT_BYTES, KIND_POLICIES.video.maxBytes)
     assert.ok(DEFAULT_ORG_IN_FLIGHT_BYTES < DEFAULT_IN_FLIGHT_BYTES)
+    assert.equal(DEFAULT_ORG_IN_FLIGHT_UPLOADS, 2)
   })
 
   it('counts each organization separately and gives back what it took', () => {
@@ -871,6 +876,7 @@ describe('uploads in flight', { skip: hasDatabase ? false : 'no Postgres at AF_T
   let a: Org
   let b: Org
   let c: Org
+  let d: Org
   const tokens = new Map<string, string>()
   const IDLE_MS = 1500
 
@@ -883,12 +889,15 @@ describe('uploads in flight', { skip: hasDatabase ? false : 'no Postgres at AF_T
       // timeout failed to stop ends anyway, late, and fails the timing
       // assertion rather than hanging the suite.
       bodyDeadlineMs: 6000,
-      bodyPace: { idleMs: IDLE_MS, minBytesPerSecond: 1, graceMs: 60_000 },
+      // No rate to speak of, because a stalled upload in these tests is meant
+      // to be held until the idle timeout, which is what they measure.
+      bodyPace: { idleMs: IDLE_MS, minBytesPerSecond: 0 },
     } })
     a = await seedOrg(h.admin, 'flight-a')
     b = await seedOrg(h.admin, 'flight-b')
     c = await seedOrg(h.admin, 'flight-c')
-    for (const o of [a, b, c]) {
+    d = await seedOrg(h.admin, 'flight-d')
+    for (const o of [a, b, c, d]) {
       const t = `aft_${randomUUID().replace(/-/g, '')}`
       await h.admin`
         INSERT INTO engine_tokens (org_id, name, token_hash, prefix)
@@ -902,6 +911,7 @@ describe('uploads in flight', { skip: hasDatabase ? false : 'no Postgres at AF_T
     await dropOrg(h.admin, a.orgId)
     await dropOrg(h.admin, b.orgId)
     await dropOrg(h.admin, c.orgId)
+    await dropOrg(h.admin, d.orgId)
     await h.close()
   })
 
@@ -933,17 +943,17 @@ describe('uploads in flight', { skip: hasDatabase ? false : 'no Postgres at AF_T
     } as RequestInit)
   }
 
-  /** The first bytes of a 5000 byte video, and then nothing, ever. */
-  function stalled(o: Org, runId: string, workflow: string) {
-    const whole = webm(5000, 11)
-    return send(o, runId, 5000, sha(whole), new ReadableStream({
+  /** The first bytes of a video of `size` bytes, and then nothing, ever. */
+  function stalled(o: Org, runId: string, workflow: string, size = 5000) {
+    const whole = webm(size, 11)
+    return send(o, runId, size, sha(whole), new ReadableStream({
       start(c) { c.enqueue(new Uint8Array(whole.subarray(0, 100))) },
     }), workflow)
   }
 
-  function complete(o: Org, runId: string, workflow: string, seed: number) {
-    const whole = webm(5000, seed)
-    return send(o, runId, 5000, sha(whole), whole, workflow)
+  function complete(o: Org, runId: string, workflow: string, seed: number, size = 5000) {
+    const whole = webm(size, seed)
+    return send(o, runId, size, sha(whole), whole, workflow)
   }
 
   it('one organization holding its whole share does not refuse another organization', async () => {
@@ -997,6 +1007,43 @@ describe('uploads in flight', { skip: hasDatabase ? false : 'no Postgres at AF_T
     await Promise.all([holdA, holdB])
     const after = await complete(c, runC, 'room again', 17)
     assert.equal(after.status, 201, `C was answered ${after.status}: ${await after.text()}`)
+  })
+
+  it('organizations already uploading cannot take the reserve kept for one with nothing arriving', async () => {
+    // A budget of 10000 and a share of 5000, so the reserve line is 5000 in
+    // use. A and B take it there between them with stalled uploads, each
+    // well inside its own share.
+    const runA = await newRun(a)
+    const holdA = stalled(a, runA, 'a holds', 3000)
+    const holdB = stalled(b, await newRun(b), 'b holds', 2000)
+    await new Promise((r) => setTimeout(r, 400))
+
+    // A's next upload fits A's share (3000 + 1000 of 5000) and fits the
+    // budget (6000 of 10000). It is refused because A is already uploading
+    // and taking it would leave less than a share free.
+    const more = await complete(a, runA, 'a wants more', 18, 1000)
+    assert.equal(more.status, 429, `A's second upload was answered ${more.status}`)
+    assert.match(((await more.json()) as { error: string }).error, /keeps room free/)
+
+    // C has nothing arriving, so it may take the reserve, a whole share.
+    const fromC = await complete(c, await newRun(c), 'c starts', 19, 5000)
+    assert.equal(fromC.status, 201, `C was answered ${fromC.status}: ${await fromC.text()}`)
+    await Promise.all([holdA, holdB])
+  })
+
+  it('one organization has at most two uploads arriving at once, however small', async () => {
+    // Two small stalled uploads from D, 2000 bytes of D's 5000 share, and a
+    // third of 1000 that fits the share, the budget and the reserve. Only the
+    // count refuses it.
+    const run = await newRun(d)
+    const one = stalled(d, run, 'd one', 1000)
+    const two = stalled(d, run, 'd two', 1000)
+    await new Promise((r) => setTimeout(r, 400))
+    const third = await complete(d, run, 'd three', 20, 1000)
+    assert.equal(third.status, 429, `D's third upload was answered ${third.status}`)
+    assert.match(((await third.json()) as { error: string }).error, /already has 2 uploads arriving/)
+    await Promise.all([one, two])
+    assert.equal((await complete(d, run, 'd after', 21, 1000)).status, 201)
   })
 
   it('an upload whose client goes away gives its reservation back', async () => {

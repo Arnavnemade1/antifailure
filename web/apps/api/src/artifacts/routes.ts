@@ -131,32 +131,37 @@ export const DEFAULT_BODY_DEADLINE_MS = 5 * 60 * 1000
 export const DEFAULT_BODY_IDLE_MS = 15 * 1000
 
 /**
- * The slowest a body may arrive on average, after the grace period below.
+ * The slowest a body may arrive on average, measured from its first moment.
  *
  * The idle timeout alone is defeated by one byte every fourteen seconds. 256
  * KiB a second is two megabits, which a CI runner exceeds by orders of
- * magnitude, and at which the largest artifact arrives in about four and a
- * quarter minutes, inside the total deadline.
+ * magnitude, and at which the largest artifact arrives in 256 seconds, inside
+ * the total deadline. There is no grace period before it applies: one would
+ * be a window in which a client holds its reservation while sending nothing,
+ * for free, on every connection it opens.
  */
 export const DEFAULT_BODY_MIN_BYTES_PER_SECOND = 256 * 1024
 
-/** How long a body gets before the minimum rate applies, for a slow start. */
-export const DEFAULT_BODY_GRACE_MS = 10 * 1000
+/**
+ * How many uploads one organization may have arriving at once, in any one
+ * process. The engine uploads one file at a time, so two allows a retry to
+ * overlap the attempt it replaces, and no more: each open upload is a
+ * connection and a reservation, and the byte share alone let an organization
+ * hold a share's worth as many small uploads as it liked.
+ */
+export const DEFAULT_ORG_IN_FLIGHT_UPLOADS = 2
 
 /** How a body must keep arriving once it has started. */
 export interface BodyPace {
   /** The longest gap between two pieces of the body. */
   idleMs: number
-  /** The slowest average rate, measured from the start once graceMs has passed. */
+  /** The slowest average rate, measured from the start of the body. */
   minBytesPerSecond: number
-  /** How long before the average rate is enforced. */
-  graceMs: number
 }
 
 export const DEFAULT_BODY_PACE: BodyPace = {
   idleMs: DEFAULT_BODY_IDLE_MS,
   minBytesPerSecond: DEFAULT_BODY_MIN_BYTES_PER_SECOND,
-  graceMs: DEFAULT_BODY_GRACE_MS,
 }
 
 export interface ArtifactRouteOptions {
@@ -171,6 +176,8 @@ export interface ArtifactRouteOptions {
   inFlightBytes?: number
   /** How many of those one organization may hold. */
   orgInFlightBytes?: number
+  /** How many uploads one organization may have arriving at once. */
+  orgInFlightUploads?: number
   /** How long a body may take to arrive. */
   bodyDeadlineMs?: number
   /** How a body must keep arriving: the idle gap and the minimum rate. */
@@ -191,8 +198,15 @@ export class ByteBudget {
   constructor(capacity: number) {
     this.capacity = capacity
   }
-  reserve(bytes: number): boolean {
-    if (bytes > this.capacity || this.used + bytes > this.capacity) return false
+  /**
+   * Takes `bytes`, refusing when that would leave less than `keepFree` of the
+   * budget untaken. The route passes one organization's share as `keepFree`
+   * for an organization that already has something arriving, and zero for
+   * one that has nothing, which is what keeps a reserve only a newcomer can
+   * enter; see the admission comment in mountArtifacts.
+   */
+  reserve(bytes: number, keepFree = 0): boolean {
+    if (bytes > this.capacity || this.used + bytes + keepFree > this.capacity) return false
     this.used += bytes
     return true
   }
@@ -210,24 +224,38 @@ export class ByteBudget {
  * the map is the size of what is arriving rather than of every tenant seen.
  */
 export class OrgByteBudgets {
-  private readonly used = new Map<string, number>()
+  private readonly used = new Map<string, { bytes: number; uploads: number }>()
   readonly capacity: number
-  constructor(capacity: number) {
+  readonly maxUploads: number
+  constructor(capacity: number, maxUploads = Number.POSITIVE_INFINITY) {
     this.capacity = capacity
+    this.maxUploads = maxUploads
+  }
+  /** Why a reservation would be refused, or null when it would not be. */
+  refusal(orgId: string, bytes: number): 'bytes' | 'uploads' | null {
+    const now = this.used.get(orgId) ?? { bytes: 0, uploads: 0 }
+    if (now.uploads + 1 > this.maxUploads) return 'uploads'
+    if (bytes > this.capacity || now.bytes + bytes > this.capacity) return 'bytes'
+    return null
   }
   reserve(orgId: string, bytes: number): boolean {
-    const now = this.used.get(orgId) ?? 0
-    if (bytes > this.capacity || now + bytes > this.capacity) return false
-    this.used.set(orgId, now + bytes)
+    if (this.refusal(orgId, bytes) !== null) return false
+    const now = this.used.get(orgId) ?? { bytes: 0, uploads: 0 }
+    this.used.set(orgId, { bytes: now.bytes + bytes, uploads: now.uploads + 1 })
     return true
   }
   release(orgId: string, bytes: number): void {
-    const left = (this.used.get(orgId) ?? 0) - bytes
-    if (left > 0) this.used.set(orgId, left)
+    const now = this.used.get(orgId)
+    if (!now) return
+    const left = { bytes: now.bytes - bytes, uploads: now.uploads - 1 }
+    if (left.uploads > 0 && left.bytes > 0) this.used.set(orgId, left)
     else this.used.delete(orgId)
   }
   inUse(orgId: string): number {
-    return this.used.get(orgId) ?? 0
+    return this.used.get(orgId)?.bytes ?? 0
+  }
+  uploads(orgId: string): number {
+    return this.used.get(orgId)?.uploads ?? 0
   }
 }
 
@@ -264,7 +292,7 @@ export async function readExactly(
       return
     }
     const elapsed = now - started
-    if (elapsed > pace.graceMs && received < (pace.minBytesPerSecond * (elapsed - pace.graceMs)) / 1000) {
+    if (received < (pace.minBytesPerSecond * elapsed) / 1000) {
       stop(`The body arrived more slowly than ${Math.round(pace.minBytesPerSecond / 1024)} KiB a second.`)
     }
   }, Math.max(10, Math.min(1000, Math.floor(pace.idleMs / 4))))
@@ -357,7 +385,9 @@ export function mountArtifacts<E extends Env>(app: Hono<E>, options: ArtifactRou
   const { pool, clock, stores } = options
   const quota = options.orgQuotaBytes ?? DEFAULT_ORG_QUOTA_BYTES
   const budget = new ByteBudget(options.inFlightBytes ?? DEFAULT_IN_FLIGHT_BYTES)
-  const orgBudgets = new OrgByteBudgets(options.orgInFlightBytes ?? DEFAULT_ORG_IN_FLIGHT_BYTES)
+  const orgShare = options.orgInFlightBytes ?? DEFAULT_ORG_IN_FLIGHT_BYTES
+  const orgBudgets = new OrgByteBudgets(
+    orgShare, options.orgInFlightUploads ?? DEFAULT_ORG_IN_FLIGHT_UPLOADS)
   const deadlineMs = options.bodyDeadlineMs ?? DEFAULT_BODY_DEADLINE_MS
   const pace = options.bodyPace ?? DEFAULT_BODY_PACE
 
@@ -459,21 +489,62 @@ export function mountArtifacts<E extends Env>(app: Hono<E>, options: ArtifactRou
       return c.json({ ...before.existing, created: false }, 200)
     }
 
-    // The organization's share first, then the process's, so that one
-    // tenant's uploads are refused by its own cap before they can reach the
-    // budget every tenant shares. Both are released in the finally below,
-    // which every exit reaches: a refusal, a stalled or slow body cut off by
-    // the pace, a client that disconnects (the read then rejects), and a
-    // throw from the database.
-    if (!orgBudgets.reserve(engine.orgId, declared.sizeBytes)) {
+    // ADMISSION. Three rules, checked in this order.
+    //
+    // 1. The organization's share: no organization holds more than
+    //    orgInFlightBytes (64 MiB), in at most orgInFlightUploads (2) uploads,
+    //    at once, so one tenant is refused by its own cap before it reaches
+    //    the budget every tenant shares.
+    // 2. The process budget: all organizations together hold at most
+    //    inFlightBytes (128 MiB).
+    // 3. The reserve: an organization that ALREADY has bytes arriving is
+    //    admitted only if one share's worth of the budget stays free
+    //    afterwards. Rule 1 alone let a few organizations, each inside its
+    //    share, fill the budget between them and starve everyone else. Under
+    //    this rule organizations that are already uploading can hold at most
+    //    inFlightBytes minus one share between them, and the last share is
+    //    entered only by an organization with nothing in flight, one upload
+    //    at a time, so an organization arriving fresh can always start one
+    //    upload unless other fresh arrivals took the reserve first.
+    //
+    // THE WORST CASE, at the defaults (128 MiB budget, 64 MiB share): two
+    // organizations fill it, one holding its 64 MiB share and one newcomer
+    // taking the 64 MiB reserve with a single upload of the largest kind. With
+    // smaller uploads it takes more of them: holders stop at 64 MiB between
+    // them, and every byte of the reserve is a first upload of some other
+    // organization. How long they hold it is bounded by the pace in
+    // readExactly: a body that stalls is cut off after DEFAULT_BODY_IDLE_MS
+    // (15 s); one that trickles must average DEFAULT_BODY_MIN_BYTES_PER_SECOND
+    // (256 KiB/s) from its first moment, so a reservation of N bytes is held
+    // at most N / 256 KiB seconds, 256 s for 64 MiB, by a client really
+    // sending 256 KiB a second for all of it, and never past
+    // DEFAULT_BODY_DEADLINE_MS (300 s). A reservation whose client sends
+    // nothing is gone within about a second, at the pace's first check. Holding the budget
+    // therefore costs real bandwidth from at least two organizations' tokens,
+    // and every reservation is released the moment its upload ends.
+    //
+    // Both reservations are released in the finally below, which every exit
+    // reaches: a refusal, a stalled or slow body cut off by the pace, a
+    // client that disconnects (the read then rejects), and a throw from the
+    // database. A process refusal releases the share taken just before it.
+    const alreadyArriving = orgBudgets.uploads(engine.orgId) > 0
+    const overShare = orgBudgets.refusal(engine.orgId, declared.sizeBytes)
+    if (overShare !== null || !orgBudgets.reserve(engine.orgId, declared.sizeBytes)) {
       return refuse(c, new ArtifactRefusal(429, 'busy',
-        'This organization already has as many artifacts arriving as one organization may send at ' +
-        'once. Try again shortly.', 10))
+        overShare === 'uploads'
+          ? `This organization already has ${orgBudgets.maxUploads} uploads arriving, which is as many ` +
+            'as one organization may send at once. Try again shortly.'
+          : 'This organization already has as many artifacts arriving as one organization may send at ' +
+            'once. Try again shortly.', 10))
     }
-    if (!budget.reserve(declared.sizeBytes)) {
+    if (!budget.reserve(declared.sizeBytes, alreadyArriving ? orgShare : 0)) {
       orgBudgets.release(engine.orgId, declared.sizeBytes)
       return refuse(c, new ArtifactRefusal(429, 'busy',
-        'This server is already receiving as many artifacts as it holds at once. Try again shortly.', 10))
+        alreadyArriving
+          ? 'This server keeps room free for organizations with nothing arriving, and this ' +
+            'organization already has an upload under way. Try again shortly.'
+          : 'This server is already receiving as many artifacts as it holds at once. Try again shortly.',
+        10))
     }
     try {
       const bytes = await readExactly(c.req.raw, declared.sizeBytes, deadlineMs, pace)
