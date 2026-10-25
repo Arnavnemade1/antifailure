@@ -157,6 +157,18 @@ describe('serving the console build', { skip: ok ? false : 'no Postgres at AF_TE
     }
   })
 
+  test('a path with a broken percent escape is the 404 page, not a server error', async () => {
+    // The router leaves an escape it cannot decode as it is, and the second
+    // decode in readAsset threw on it, so a scanner's `/%` reached the error
+    // handler and was answered 500, which reads to a monitor as the control
+    // plane failing. Each of these is a path nothing in the build is named.
+    for (const path of ['/%', '/%zz', '/runs%', '/%E0%A4%A', '/_next/%ff.js']) {
+      const res = await h.fetch(path)
+      assert.equal(res.status, 404, `${path} answered ${res.status}`)
+      assert.match(await res.text(), /<title>not found<\/title>/, `${path} was not the 404 page`)
+    }
+  })
+
   test('every page carries the headers that make it safe to serve', async () => {
     const res = await h.fetch('/')
     const csp = res.headers.get('content-security-policy') ?? ''
