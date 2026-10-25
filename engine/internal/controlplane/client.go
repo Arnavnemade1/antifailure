@@ -41,7 +41,12 @@ const DefaultBaseURL = "https://app.antifailure.dev"
 type Client struct {
 	baseURL *url.URL
 	http    *http.Client
-	clock   clock.Clock
+	// upload sends a run's recordings. A separate client because the one
+	// above gives up after thirty seconds, which is right for a batch of
+	// events and is a sixty four megabyte video on a slow runner failing
+	// halfway every time.
+	upload *http.Client
+	clock  clock.Clock
 	// redactor scrubs anything before it is written to a log line here. The
 	// control plane's own error bodies are quoted in diagnostics, and a body
 	// that echoes a request header would otherwise print a token.
@@ -142,14 +147,17 @@ func New(opts Options) (*Client, error) {
 		c = clock.New()
 	}
 	httpClient := opts.HTTP
+	uploadClient := opts.HTTP
 	if httpClient == nil {
 		httpClient = airgap.Client(airgap.SiteControlPlane, 30*time.Second)
+		uploadClient = airgap.Client(airgap.SiteControlPlane, UploadTimeout)
 	}
 	return &Client{
 		baseURL:  base,
 		token:    opts.Token,
 		renew:    opts.Renew,
 		http:     httpClient,
+		upload:   uploadClient,
 		clock:    c,
 		redactor: opts.Redactor,
 	}, nil

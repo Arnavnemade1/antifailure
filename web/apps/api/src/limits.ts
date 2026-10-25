@@ -431,6 +431,22 @@ export const ENDPOINT_LIMITS: Record<string, EndpointLimit> = {
     rate: 10, burst: 60, key: 'token',
     reason: 'Polled by af env pull and by a CI step, not by a loop.',
   },
+  // Run artifacts. See artifacts/routes.ts.
+  'POST /v1/environments/:envId/runs/:runId/artifacts': {
+    rate: 2, burst: 60, key: 'token',
+    reason:
+      'af test uploads a video, a trace and a screenshot per workflow once the run ends, so a run of ' +
+      'twenty workflows is sixty uploads in a burst and then nothing. The sustained rate is low because ' +
+      'every upload is up to sixty four megabytes held in memory; the per process byte budget refuses ' +
+      'what does not fit regardless, and this keeps one token from being the reason it is full.',
+  },
+  'GET /v1/artifacts/:id': {
+    rate: 20, burst: 120, key: 'ip',
+    reason:
+      'A run page shows each workflow\'s screenshot and video, and a video element makes repeated range ' +
+      'requests as it plays and seeks. Keyed on the address because the caller is a browser with a ' +
+      'session, which has no token to key on.',
+  },
 
   // Studio, for an engine. All four are polls, so the numbers are about how
   // often a poll is reasonable rather than about how expensive the query is.
@@ -534,6 +550,15 @@ export const BODY_LIMITS: Record<string, BodyLimit> = {
   // The PostHog proxy, from the same allowlist as its rate limits, so the
   // number beside the route in analytics/posthog.ts is the number applied.
   ...postHogBodyLimits(),
+
+  'POST /v1/environments/:envId/runs/:runId/artifacts': {
+    maxBytes: 64 * 1024 * 1024,
+    reason:
+      'The largest artifact kind, a video or a trace, may be sixty four megabytes, and the route ' +
+      'refuses each kind above its own ceiling from Content-Length before reading the body. This is the ' +
+      'outer bound for a request that lies about its length, and is the same ceiling the website media ' +
+      'library sets for a video. See KIND_POLICIES in artifacts/policy.ts.',
+  },
 
   'POST /webhooks/github': {
     maxBytes: 5 * 1024 * 1024,

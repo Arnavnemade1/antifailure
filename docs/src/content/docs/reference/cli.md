@@ -2472,6 +2472,11 @@ crashed, a page that never loaded, or a persona with no password is not
 evidence about the application, and charging it to the application is how
 people learn to ignore the results. Only a real failure exits non zero.
 
+A run that reports to a control plane uploads each workflow's video, trace and
+screenshot once it finishes, if the organization has turned on artifact
+storage, and the run's page in the console shows them. AF_ARTIFACTS=local keeps
+them on this machine whatever the organization decided.
+
 ```
 af test [flags]
 ```

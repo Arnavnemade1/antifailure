@@ -517,6 +517,13 @@ resource "azurerm_container_app" "this" {
         name  = "AF_TRUSTED_PROXY_HOPS"
         value = tostring(var.trusted_proxy_hops)
       }
+      # How much each organization may keep of the run recordings it uploads,
+      # which live in this stack's own database. See
+      # web/apps/api/src/artifacts/routes.ts.
+      env {
+        name  = "AF_ARTIFACT_ORG_QUOTA_MIB"
+        value = tostring(var.artifact_org_quota_mib)
+      }
       dynamic "env" {
         for_each = var.app_base_url == "" ? [] : [var.app_base_url]
         content {

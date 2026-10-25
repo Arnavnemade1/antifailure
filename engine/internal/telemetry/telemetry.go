@@ -138,10 +138,15 @@ type Telemetry struct {
 	restore  func()
 	red      *redact.Redactor
 
-	file    *events.FileSink
-	cpSink  *controlplane.Sink
-	spool   *Spool
-	spanEnd func()
+	file   *events.FileSink
+	cpSink *controlplane.Sink
+	// cpClient is the client cpSink sends through, kept so that a caller
+	// sending something that is not an event, a run's recordings, uses the
+	// same credential and the same renewal rather than building a second one
+	// that would disagree about who this run is.
+	cpClient *controlplane.Client
+	spool    *Spool
+	spanEnd  func()
 
 	warn func(string)
 
@@ -359,12 +364,34 @@ func (t *Telemetry) attachControlPlane(
 		}
 	}
 
+	t.cpClient = client
 	t.cpSink = controlplane.NewSink(controlplane.SinkOptions{
 		Client: client, Clock: c, Overflow: overflow,
 		OnError: func(err error) { t.warn(err.Error()) },
 	})
 	bus.AddSink(t.cpSink)
 	return nil
+}
+
+// ControlPlane returns the client this run reports through, or nil when it
+// reports to no control plane, which is the ordinary state of a developer
+// machine with no token.
+func (t *Telemetry) ControlPlane() *controlplane.Client {
+	if t == nil {
+		return nil
+	}
+	return t.cpClient
+}
+
+// FlushControlPlane delivers what the control plane sink is holding, and
+// returns once it has been sent or kept. A run's recordings are uploaded after
+// its events, and the control plane refuses a recording for a run it has no
+// record of, so the events go first.
+func (t *Telemetry) FlushControlPlane(ctx context.Context) error {
+	if t == nil || t.cpSink == nil {
+		return nil
+	}
+	return t.cpSink.Flush(ctx)
 }
 
 // StartCommand opens the root span for one `af` invocation.

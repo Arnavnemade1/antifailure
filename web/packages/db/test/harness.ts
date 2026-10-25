@@ -170,9 +170,14 @@ export async function seedTenant(admin: postgres.Sql, label: string): Promise<Fi
   await admin`
     INSERT INTO verdicts (org_id, run_id, workflow, value, summary)
     VALUES (${orgId}, ${runId}, 'sign-up', 'pass', ${`${label} signed up`})`
-  await admin`
+  const [artifact] = await admin<{ id: string }[]>`
     INSERT INTO artifacts (org_id, run_id, kind, storage_key)
-    VALUES (${orgId}, ${runId}, 'screenshot', ${`s3://bucket/${slug}/1.png`})`
+    VALUES (${orgId}, ${runId}, 'screenshot', ${`s3://bucket/${slug}/1.png`}) RETURNING id`
+  // The bytes the Postgres store holds for an artifact (0052), so the tenancy
+  // suite has a row of each tenant's to fail to read and fail to change.
+  await admin`
+    INSERT INTO artifact_chunks (org_id, artifact_id, seq, bytes)
+    VALUES (${orgId}, ${artifact!.id}, 0, ${Buffer.from([0x89, 0x50, 0x4e, 0x47])})`
   await admin`
     INSERT INTO golden_versions (org_id, repository_id, version, verified)
     VALUES (${orgId}, ${repoId}, '2026-01-01T00-00-00Z', true)`

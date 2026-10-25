@@ -350,6 +350,16 @@ export const ROUTE_BOUNDARY: Record<string, RouteBoundary> = {
     grounds: 'engine-transport',
     reason: 'The engine reads back an environment it reported. Scoped to the token\'s organization by the same tenant transaction every other read uses.',
   },
+  'POST /v1/environments/:envId/runs/:runId/artifacts': {
+    audience: 'excluded',
+    grounds: 'engine-transport',
+    reason: 'af test uploading the recordings of a run it reported, after the run\'s own events. The headers it sends are the engine\'s and move with it; what a customer decides is the organization setting, which is in the console.',
+  },
+  'GET /v1/artifacts/:id': {
+    audience: 'excluded',
+    grounds: 'console-transport',
+    reason: 'The run page\'s video and image elements, and its download links, on the console\'s own origin with its session. Not a reading API: the index of artifacts is runs.artifacts, and a caller with a token has no session to send here.',
+  },
 
   // ---------------------------------------------------------------------
   // Credentials the document does not describe.

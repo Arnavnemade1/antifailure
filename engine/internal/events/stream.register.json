@@ -53,6 +53,7 @@
     "agent.started",
     "agent.step",
     "agent.verdict",
+    "artifact.stored",
     "build.failed",
     "build.finished",
     "build.log",

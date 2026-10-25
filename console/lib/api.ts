@@ -20,6 +20,14 @@ export { ApiError } from "@/lib/wire";
  */
 const BASE = process.env.NEXT_PUBLIC_AF_API ?? "";
 
+/** A control plane path as a link the browser follows itself, for the one
+ *  response a fetch would only get in the way of: a file to open or save. The
+ *  same base as every fetch, so it is relative in every build that ships and
+ *  the session cookie rides it the same way. */
+export function apiHref(path: string): string {
+  return `${BASE}${path}`;
+}
+
 /** Sent on every mutation. Read from GET /auth/session, which derives it from
  *  the session secret without revealing it. */
 const CSRF_HEADER = "x-antifailure-csrf";

@@ -1084,11 +1084,12 @@ const ERASURE_STATEMENT = {
     'their GitHub login, email address, display name and avatar URL. Those accounts are listed ' +
     'under orphaned accounts.',
   retention:
-    'There is no retention policy table in this schema, so nothing expires on a schedule and no ' +
-    'policy is enforced anywhere. The two time limits that do exist are specific: a deletion ' +
-    'export stays downloadable for seven days and is then destroyed, and artifacts carry a ' +
-    'single retained flag. A working retention policy would need a table of rules, a sweeper ' +
-    'that reads it, and a record of what each run deleted.',
+    'There is no retention policy table in this schema, so there is no general policy to read. ' +
+    'The time limits that do exist are specific: a deletion export stays downloadable for seven ' +
+    'days and is then destroyed, and a stored run artifact expires after its organization\'s ' +
+    'artifact retention, 30 days unless the organization chose between 1 and 365, when the ' +
+    'housekeeping sweep deletes its bytes and marks it not retained. A general retention policy ' +
+    'would need a table of rules, a sweeper that reads it, and a record of what each run deleted.',
 } as const
 
 // ---------------------------------------------------------------------------

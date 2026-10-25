@@ -453,9 +453,38 @@ async function applyToProjection(
         },
       })
       return applyVerdict(db, orgId, event)
+    case 'artifact.stored':
+      return applyArtifactStored(db, orgId, event)
     default:
       return applyEnvironment(db, clock, orgId, event, analytics)
   }
+}
+
+/**
+ * Confirms an artifact the engine says it stored.
+ *
+ * The upload route writes the row, because it is the one place the bytes are
+ * verified against their digest, so this has nothing to create. What it can
+ * still do is refuse to let the timeline say an artifact was stored when the
+ * control plane holds no such artifact: the event is kept, as every accepted
+ * event is, and the note says why it projects nothing. An engine that reports
+ * an artifact it never managed to upload is the case this is for.
+ */
+async function applyArtifactStored(db: Db, orgId: string, event: IncomingEvent): Promise<string | null> {
+  const payload = event.payload ?? {}
+  const artifactId = text(payload.artifact_id, 64)
+  if (artifactId === null || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(artifactId)) {
+    return 'Stored, but the event names no artifact, so there is nothing to confirm.'
+  }
+  const rows = await db.execute<{ id: string }>(sql`
+    SELECT id FROM artifacts WHERE id = ${artifactId}::uuid AND org_id = ${orgId}::uuid`)
+  if (rows.length === 0) {
+    return (
+      `Stored, but this organization holds no artifact ${artifactId}, so the upload it reports ` +
+      'did not land here.'
+    )
+  }
+  return null
 }
 
 async function applyEnvironment(
@@ -873,7 +902,7 @@ async function applyRun(
     )
   }
 
-  const id = deterministicId(orgId, event.envId, runId)
+  const id = runRowFor(orgId, event.envId, runId)
   const sequence = event.sequence ?? 0
   const kind = text(payload.kind, 200) ?? 'workflows'
   const finished = event.type === 'run.finished'
@@ -944,7 +973,7 @@ async function applyVerdict(db: Db, orgId: string, event: IncomingEvent): Promis
   // about it. A verdict whose run event was dropped from an overflowing spool
   // is the ordinary case, not a hypothetical one, and a verdict that waited
   // for a run.started that already came and went would wait forever.
-  const runRow = deterministicId(orgId, event.envId, runId)
+  const runRow = runRowFor(orgId, event.envId, runId)
   await db.execute(sql`
     INSERT INTO runs (id, org_id, environment_id, kind, state, created_at)
     VALUES (${runRow}::uuid, ${orgId}, ${environmentId}::uuid, 'workflows',
@@ -1027,6 +1056,17 @@ async function environmentIdFor(
  * It exists so that two events about the same thing, arriving in either order,
  * write one row without a column to join them on.
  */
+/**
+ * The runs row a run reported by an engine is recorded under.
+ *
+ * Exported for the artifact upload route, which attaches evidence to a run it
+ * has only the engine's own identifiers for. One function for both, so an
+ * artifact cannot be filed under a row the run's events did not create.
+ */
+export function runRowFor(orgId: string, envId: string, runId: string): string {
+  return deterministicId(orgId, envId, runId)
+}
+
 function deterministicId(a: string, b: string, c: string): string {
   const hash = createHash('sha1').update(`${a} ${b} ${c}`).digest()
   // Version 5 and the RFC 4122 variant, stamped into the bytes the standard

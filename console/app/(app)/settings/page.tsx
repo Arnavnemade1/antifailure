@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { mutate, query, useApi } from "@/lib/api";
+import { bytes } from "@/lib/format";
 import { useSessionContext } from "@/components/session";
 import { may } from "@/lib/roles";
 import {
@@ -48,6 +49,16 @@ interface Settings {
   };
   deletion: Deletion | null;
   exportRetentionDays: number;
+}
+
+interface ArtifactStorage {
+  enabled: boolean;
+  retentionDays: number;
+  usedBytes: number;
+  kept: number;
+  quotaBytes: number;
+  minRetentionDays: number;
+  maxRetentionDays: number;
 }
 
 interface BillingContact {
@@ -189,6 +200,123 @@ function StartCard({ orgId }: { orgId: string }) {
           {choice === null || choice === "skipped" ? "Answer it" : "Change"}
         </LinkButton>
       </div>
+    </Card>
+  );
+}
+
+/* -------------------------------------------------------------------------
+ * Artifact storage
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Whether a run's recordings leave the machine that made them.
+ *
+ * Off until somebody turns it on, because a recording is the application as
+ * the runner drove it: every page it showed, test data and all. The control
+ * plane refuses an upload until this says yes, and the switch is written to
+ * the audit log either way.
+ */
+function ArtifactStorageCard({ csrf, mayEdit }: { csrf: string; mayEdit: boolean }) {
+  const state = useApi<ArtifactStorage>(() => query("org.artifactStorage"), []);
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [days, setDays] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<{ tone: "ok" | "bad"; text: string } | null>(null);
+
+  return (
+    <Card
+      title="Artifact storage"
+      note="Whether the runner uploads each workflow's video, trace and screenshot here after a run, so a run's page can show why it failed after the machine that ran it is gone."
+    >
+      <Loaded state={state} framed skeleton={<CardSkeleton count={1} />}>
+        {(loaded) => {
+          const on = enabled ?? loaded.enabled;
+          const retention = days ?? String(loaded.retentionDays);
+          const n = Number(retention);
+          const validDays =
+            Number.isInteger(n) && n >= loaded.minRetentionDays && n <= loaded.maxRetentionDays;
+          const changed = on !== loaded.enabled || (validDays && n !== loaded.retentionDays);
+
+          return (
+            <div className="space-y-4 px-4 py-4">
+              <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                <Fact label="Uploads">{loaded.enabled ? "On" : "Off"}</Fact>
+                <Fact label="Kept for">{loaded.retentionDays} days</Fact>
+                <Fact label="Used">
+                  {bytes(loaded.usedBytes)} of {bytes(loaded.quotaBytes)}, {loaded.kept} file
+                  {loaded.kept === 1 ? "" : "s"}
+                </Fact>
+              </dl>
+
+              <p className="max-w-[72ch] text-[12.5px] leading-5 text-muted">
+                A recording shows whatever the application showed the runner, test data included.
+                While this is off, recordings stay on the machine that ran them. A runner started
+                with <span className="font-mono text-[11.5px]">AF_ARTIFACTS=local</span> keeps its
+                own whatever this says. Turning it off stops new uploads, and a new retention
+                applies to files stored after it changes: files already kept are dropped when the
+                time they were stored with runs out.
+              </p>
+
+              {mayEdit ? (
+                <form
+                  className="flex flex-wrap items-end gap-x-6 gap-y-3"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    if (!validDays) return;
+                    setBusy(true);
+                    setSaid(null);
+                    try {
+                      await mutate("org.setArtifactStorage", { enabled: on, retentionDays: n }, csrf);
+                      setSaid({ tone: "ok", text: "Saved, and recorded in the audit log." });
+                      setEnabled(null);
+                      setDays(null);
+                      state.reload();
+                    } catch (err) {
+                      setSaid({ tone: "bad", text: saidWrong(err) });
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  <label className="flex min-h-11 items-center gap-2.5 text-[13.5px] text-ink">
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={(e) => setEnabled(e.target.checked)}
+                      className="h-4 w-4 accent-[#101010]"
+                    />
+                    Upload run recordings
+                  </label>
+                  <div className="w-full max-w-[160px]">
+                    <Field label={`Keep for (days, ${loaded.minRetentionDays} to ${loaded.maxRetentionDays})`}>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min={loaded.minRetentionDays}
+                        max={loaded.maxRetentionDays}
+                        step={1}
+                        value={retention}
+                        onChange={(e) => setDays(e.target.value)}
+                        className={inputClass}
+                        aria-invalid={!validDays}
+                      />
+                    </Field>
+                  </div>
+                  <Button type="submit" variant="primary" disabled={!changed || !validDays} busy={busy}>
+                    Save
+                  </Button>
+                </form>
+              ) : (
+                <p className="text-[12px] leading-5 text-dim">
+                  An owner or an administrator can change this.
+                </p>
+              )}
+
+              {said ? <Said tone={said.tone}>{said.text}</Said> : null}
+            </div>
+          );
+        }}
+      </Loaded>
     </Card>
   );
 }
@@ -337,6 +465,7 @@ export default function SettingsPage() {
               onSaved={state.reload}
             />
             {session.data?.orgId ? <StartCard orgId={session.data.orgId} /> : null}
+            <ArtifactStorageCard csrf={csrf} mayEdit={mayEditSettings} />
             {mayBill ? <BillingContactCard csrf={csrf} /> : null}
             {maySessions ? <Sessions csrf={csrf} /> : null}
             {mayExport ? <ExportCard csrf={csrf} slug={settings.slug} /> : null}

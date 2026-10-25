@@ -30,6 +30,7 @@ This page is generated from `schemas/events.v1.json`. Edit the schema, then run 
 | `agent.started` | An agent workflow has started. |
 | `agent.step` | An agent took one action. The data carries its stated intent. |
 | `agent.verdict` | A workflow reached a verdict. |
+| `artifact.stored` | A run's video, trace or screenshot was uploaded to the control plane. The data carries the artifact's identifier, its kind, its workflow, its size and its digest. |
 | `build.failed` | A service build failed. |
 | `build.finished` | A service build succeeded. The data carries the image digest. |
 | `build.log` | A line of build output, redacted. |

@@ -116,6 +116,13 @@ export interface StartApiOptions {
   /** The auth limiter's rate and burst, when a test needs it to trip before the
    *  per-endpoint limit that sits in front of it on the same key. */
   authLimit?: { rate: number; burst: number }
+  /** The artifact quota, memory budget and body deadline, for a suite that
+   *  needs them small enough to reach. */
+  artifactLimits?: {
+    orgQuotaBytes?: number; inFlightBytes?: number; orgInFlightBytes?: number
+    orgInFlightUploads?: number; bodyDeadlineMs?: number
+    bodyPace?: { idleMs: number; minBytesPerSecond: number }
+  }
   /** Who may sign in. Undefined leaves the server open, which is its default. */
   signInAllowlist?: ReadonlySet<string> | null
   /** Whether a sign-in with no organization creates one. Undefined is off,
@@ -282,6 +289,7 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
     secureCookies: options.secureCookies ?? false,
     ...(options.trustedProxyHops ? { trustedProxyHops: options.trustedProxyHops } : {}),
     ...(options.authLimit ? { authLimit: options.authLimit } : {}),
+    ...(options.artifactLimits ? { artifactLimits: options.artifactLimits } : {}),
     appBaseUrl: options.appBaseUrl ?? 'http://app.test/',
     signInAllowlist: options.signInAllowlist ?? null,
     selfServeSignup: options.selfServeSignup ?? false,

@@ -66,6 +66,8 @@ spec:
               value: {{ .Values.config.poolMax | quote }}
             - name: AF_TRUSTED_PROXY_HOPS
               value: {{ .Values.config.trustedProxyHops | quote }}
+            - name: AF_ARTIFACT_ORG_QUOTA_MIB
+              value: {{ .Values.config.artifactOrgQuotaMib | quote }}
             {{- if .Values.config.appBaseUrl }}
             - name: AF_APP_BASE_URL
               value: {{ .Values.config.appBaseUrl | quote }}

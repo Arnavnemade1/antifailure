@@ -173,6 +173,9 @@ import { validateLead, recordLead, leadMessage, type LeadNotifier } from './ente
 import { mountApplicationRoutes } from './recruitment/routes.ts'
 import { mountWebsitePublished } from './admin/website-public.ts'
 import { mountWebsiteMedia, websiteMediaUploadGuard } from './admin/website-media.ts'
+import { DEFAULT_ORG_QUOTA_BYTES, mountArtifacts, type ArtifactRouteOptions } from './artifacts/routes.ts'
+import { ArtifactStores } from './artifacts/store.ts'
+import { PostgresArtifactStore } from './artifacts/postgres-store.ts'
 import {
   limitFor, bucketFor, bodyLimitFor, servedRoute, ENDPOINT_LIMITS, type EndpointLimit,
 } from './limits.ts'
@@ -315,6 +318,16 @@ export interface ServerOptions {
   providerBases?: Record<string, string>
   ingestLimit?: { rate: number; burst: number }
   authLimit?: { rate: number; burst: number }
+  /**
+   * Where uploaded run artifacts are written and read from. Unset means this
+   * database, which every installation has; see artifacts/store.ts for why it
+   * is an interface and how a second backend is added beside it.
+   */
+  artifactStores?: ArtifactStores
+  /** The artifact limits, overridden by tests that need small ones. */
+  artifactLimits?: Pick<ArtifactRouteOptions,
+    'orgQuotaBytes' | 'inFlightBytes' | 'orgInFlightBytes' | 'orgInFlightUploads' | 'bodyDeadlineMs'
+    | 'bodyPace'>
   /** The build, reported as a label on af_control_plane_info so a graph can
    *  say which version produced a number. */
   version?: string
@@ -597,6 +610,9 @@ export function createServer(options: ServerOptions) {
       counter: metrics.controlPlaneFailures,
     })
   const hostedRequiredPlan = options.hostedRequiredPlan ?? null
+  // The one value the upload route enforces and the settings page reports, so
+  // the page can never show a quota other than the one a refusal names.
+  const artifactQuotaBytes = options.artifactLimits?.orgQuotaBytes ?? DEFAULT_ORG_QUOTA_BYTES
   const operatorSetsPlan = options.operatorSetsPlan ?? false
   // Every cross origin route on this server reads THIS, through matchSiteOrigin
   // and nothing else. Empty means no browser on another origin is answered,
@@ -1074,7 +1090,8 @@ export function createServer(options: ServerOptions) {
       appBaseUrl: options.appBaseUrl ?? '', mailer: options.emailSignIn?.mailer ?? null,
       productName: options.emailSignIn?.productName ?? 'Antifailure', analytics,
       analyticsOperatorOrgSlug: options.analyticsOperatorOrgSlug ?? null,
-      hostedRequiredPlan, operatorSetsPlan, admin: null, adminPool: null, origin: 'api',
+      hostedRequiredPlan, operatorSetsPlan, artifactQuotaBytes, admin: null, adminPool: null,
+      origin: 'api',
     },
     actorFrom: async (cookie) => {
       const session = await sessionFrom(cookie)
@@ -1948,6 +1965,14 @@ export function createServer(options: ServerOptions) {
   mountApplicationRoutes(app, { pool: options.pool, clock, siteOrigins })
   mountWebsitePublished(app, { pool: options.pool, siteOrigins })
   mountWebsiteMedia(app, websiteMedia)
+  mountArtifacts(app, {
+    pool: options.pool,
+    clock,
+    stores: options.artifactStores ?? new ArtifactStores(new PostgresArtifactStore()),
+    hostedRequiredPlan,
+    ...options.artifactLimits,
+    orgQuotaBytes: artifactQuotaBytes,
+  })
 
   app.options('/v1/leads', (c) => {
     if (!allowLeadOrigin(c)) return c.body(null, 403)
@@ -3637,6 +3662,7 @@ export function createServer(options: ServerOptions) {
           analyticsOperatorOrgSlug: options.analyticsOperatorOrgSlug ?? null,
           hostedRequiredPlan,
           operatorSetsPlan,
+          artifactQuotaBytes,
           actor,
           origin: 'web',
           requestId: c.get('requestId') ?? null,

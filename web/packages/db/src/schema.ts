@@ -117,6 +117,12 @@ export const organizations = pgTable('organizations', {
   suspendedAt: timestamp('suspended_at', { withTimezone: true }),
   suspendedReason: text('suspended_reason'),
   suspendedBy: text('suspended_by'),
+  // Whether this organization accepts uploaded run artifacts, and how long it
+  // keeps them (0052). Off by default: the data boundary has always said the
+  // recordings stay where the run happened, and an organization that never
+  // turns this on keeps that.
+  artifactUploadsEnabled: boolean('artifact_uploads_enabled').notNull().default(false),
+  artifactRetentionDays: integer('artifact_retention_days').notNull().default(30),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [uniqueIndex('organizations_slug_key').on(t.slug)])
@@ -281,7 +287,22 @@ export const artifacts = pgTable('artifacts', {
   sha256: text('sha256'),
   retained: boolean('retained').notNull().default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  // 0052. The workflow the artifact is evidence for, the ArtifactStore whose
+  // locator storage_key is, and when retention removes the bytes.
+  workflow: text('workflow').notNull().default(''),
+  backend: text('backend').notNull().default('postgres'),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
 }, (t) => [index('artifacts_run_idx').on(t.runId, t.step)])
+
+/** The bytes of an artifact held by the Postgres ArtifactStore (0052), in
+ *  chunks of at most a megabyte. Written once and never updated. */
+export const artifactChunks = pgTable('artifact_chunks', {
+  orgId: uuid('org_id').notNull(),
+  artifactId: uuid('artifact_id').notNull(),
+  seq: integer('seq').notNull(),
+  bytes: bytea('bytes').notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+}, (t) => [primaryKey({ columns: [t.artifactId, t.seq] })])
 
 export const maskingRules = pgTable('masking_rules', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -1707,7 +1728,7 @@ export const customRoleGrants = pgTable('custom_role_grants', {
 export const tenantScopedTables = [
   environmentUsage, environmentUsageDaily, usageRollupState,
   members, githubInstallations, repositories, environments, goldenVersions,
-  runs, verdicts, artifacts, maskingRules, networkRules, runtimes, engineTokens,
+  runs, verdicts, artifacts, artifactChunks, maskingRules, networkRules, runtimes, engineTokens,
   events, auditEntries, auditStreamPositions, auditStreamDestinations,
   providerKeys, providerBudgets,
   ssoConnections, ssoConnectionSecrets, ssoDomains, ssoLoginStates,
