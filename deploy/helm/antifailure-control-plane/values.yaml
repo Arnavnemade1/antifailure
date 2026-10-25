@@ -108,6 +108,11 @@ config:
   # who reaches the inner one directly gets to write the entry this count
   # attributes to the outer one.
   trustedProxyHops: 1
+  # How many MiB of uploaded run recordings each organization may keep. They
+  # are stored in the control plane's own database, so raise this only with
+  # the database's storage. A value that is not a whole number from 1 to
+  # 1048576 stops the process at startup.
+  artifactOrgQuotaMib: 256
   # Drop event partitions older than this many whole months. Empty keeps
   # everything, which is the default because retention is an operator's
   # decision and not a chart's.

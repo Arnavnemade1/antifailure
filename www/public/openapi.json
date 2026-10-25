@@ -5385,6 +5385,70 @@
         }
       }
     },
+    "/trpc/org.artifactStorage": {
+      "get": {
+        "operationId": "trpc_org_artifactStorage",
+        "summary": "org.artifactStorage",
+        "description": "Requires the environments.view permission, held by: owner, admin, member, viewer.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tRPC result envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrpcResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The input did not satisfy this route's validator.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrpcFailure"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrpcFailure"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The role does not hold environments.view.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrpcFailure"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The route threw. tRPC formats this one, so it is a tRPC envelope rather than the ServerFailure body, and the stack is withheld: it names internal paths and table names to anyone who can provoke an error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrpcFailure"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/trpc/org.billingContact": {
       "get": {
         "operationId": "trpc_org_billingContact",
@@ -5612,6 +5676,106 @@
           },
           "403": {
             "description": "The role does not hold members.manage.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrpcFailure"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The route threw. tRPC formats this one, so it is a tRPC envelope rather than the ServerFailure body, and the stack is withheld: it names internal paths and table names to anyone who can provoke an error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrpcFailure"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/trpc/org.setArtifactStorage": {
+      "post": {
+        "operationId": "trpc_org_setArtifactStorage",
+        "summary": "org.setArtifactStorage",
+        "description": "Requires the organization.settings permission, held by: owner, admin.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "x-antifailure-csrf",
+            "in": "header",
+            "required": true,
+            "description": "The CSRF token returned by GET /auth/session.",
+            "schema": {
+              "type": "string",
+              "minLength": 32
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "retentionDays": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 365
+                  }
+                },
+                "required": [
+                  "enabled",
+                  "retentionDays"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The tRPC result envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrpcResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The input did not satisfy this route's validator.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrpcFailure"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrpcFailure"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The role does not hold organization.settings.",
             "content": {
               "application/json": {
                 "schema": {

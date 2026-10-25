@@ -202,6 +202,16 @@ variable "pool_max" {
 # something trusted, counted from the end. One is the Container Apps ingress
 # alone, which is what this module builds. An installation that puts a Front
 # Door or a WAF in front of the ingress has two, and says so here.
+variable "artifact_org_quota_mib" {
+  type        = number
+  default     = 256
+  description = "How many MiB of uploaded run recordings each organization may keep. The recordings are stored in this stack's Postgres, so raise it only with database_storage_mb. Sets AF_ARTIFACT_ORG_QUOTA_MIB."
+  validation {
+    condition     = var.artifact_org_quota_mib >= 1 && var.artifact_org_quota_mib <= 1048576 && floor(var.artifact_org_quota_mib) == var.artifact_org_quota_mib
+    error_message = "artifact_org_quota_mib must be a whole number from 1 to 1048576, which is what the control plane accepts at startup."
+  }
+}
+
 variable "trusted_proxy_hops" {
   type        = number
   default     = 1

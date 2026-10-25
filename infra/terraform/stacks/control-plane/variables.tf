@@ -148,6 +148,12 @@ variable "pool_max" {
   description = "Postgres connections each replica may hold. (max_replicas + min_replicas) times this, plus four for the jobs and break-glass, has to fit in what the database SKU hands a role without pg_use_reserved_connections."
 }
 
+variable "artifact_org_quota_mib" {
+  type        = number
+  default     = 256
+  description = "MiB of uploaded run recordings each organization may keep, in this stack's database. Raise it only with database_storage_mb. Sets AF_ARTIFACT_ORG_QUOTA_MIB."
+}
+
 variable "trusted_proxy_hops" {
   type        = number
   default     = 1
