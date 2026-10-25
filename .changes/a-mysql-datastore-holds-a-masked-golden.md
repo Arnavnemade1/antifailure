@@ -16,6 +16,11 @@ position. Views, triggers, stored routines and events are not copied, and a
 refresh names every view it left out. A branch is a full copy rather than
 shared storage, so it takes longer the larger the golden is.
 
+The source must be a `mysql://` URL. Any other form, a `mariadb://` URL or a
+driver DSN, is refused rather than read as no source, and a column no rule
+covered that the scan cannot read, such as non UTF-8 bytes in a column named
+like a key, refuses the golden rather than publishing it.
+
 `af init` now proposes a MySQL it finds beside a Postgres as a golden store.
 The engine runs MySQL 8.4 locally for the goldens and branches, in a container
 called `af-mysql`. See the datastores page for the details.

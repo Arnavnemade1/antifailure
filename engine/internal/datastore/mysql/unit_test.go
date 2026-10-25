@@ -109,3 +109,68 @@ func TestCapabilities_DeclareACopyRatherThanSharedStorage(t *testing.T) {
 	}, p.Capabilities())
 	require.Equal(t, "mysql", p.Name())
 }
+
+// Masking knows a candidate's tables by the source's name and the scan reads
+// them under the candidate's. What masking reports as copied unchanged is what
+// the scan matches against, so it is named the scan's way: under the source's
+// name it matched nothing and every unruled column counted as ruled.
+func TestUnruledNames_AreTheDatabaseTheScanReads(t *testing.T) {
+	t.Parallel()
+	tbl := table{
+		name: "vault",
+		columns: []column{
+			{name: "id", typ: "int", unique: true},
+			{name: "signing_key", typ: "varbinary(32)"},
+		},
+		primaryKey: []string{"id"},
+	}
+	tables := []masking.Table{tbl.maskingTable("shop", "af_cand_1")}
+	rules, err := masking.NewRuleSet(nil)
+	require.NoError(t, err)
+	plan := masking.BuildPlan(tables, rules.Assign(tables), "h")
+	require.Contains(t, plan.CopiedUnchangedNames(), "shop.vault.signing_key",
+		"precondition: the plan names the column by the source, which the scan never sees")
+	require.Equal(t, []string{"af_cand_1.vault.signing_key"}, unruledNames(plan, "af_cand_1"))
+}
+
+// The scan refuses an unruled name it could never match rather than letting
+// it fall through as a ruled column.
+func TestUnruledUnder_RefusesANameUnderAnotherDatabase(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, unruledUnder("af_cand_1", nil))
+	require.NoError(t, unruledUnder("af_cand_1", []string{"af_cand_1.vault.signing_key"}))
+	for _, bad := range []string{
+		"shop.vault.signing_key",
+		"af_cand_10.vault.signing_key",
+		"af_cand_1.signing_key",
+	} {
+		err := unruledUnder("af_cand_1", []string{"af_cand_1.vault.id", bad})
+		require.ErrorContains(t, err, bad)
+	}
+}
+
+// A source in a form this does not read is refused, not taken for no source:
+// taken for none, a real production produced an empty golden that verified
+// clean. No address, and the conformance suite's placeholder, are none.
+func TestOpenSource_RefusesAnAddressItCannotReadWithoutQuotingIt(t *testing.T) {
+	t.Parallel()
+	p := &Provider{}
+	for _, none := range []string{"", "  ", "antifailure://conformance/source"} {
+		src, err := p.openSource(secrets.New(none))
+		require.NoError(t, err, none)
+		require.Nil(t, src, none)
+	}
+	for _, bad := range []string{
+		"mariadb://u:hunter2@db.internal:3306/shop",
+		"jdbc:mysql://db.internal:3306/shop?password=hunter2",
+		"u:hunter2@tcp(db.internal:3306)/shop",
+		"postgres://u:hunter2@db.internal/shop",
+	} {
+		src, err := p.openSource(secrets.New(bad))
+		require.Nil(t, src, bad)
+		require.ErrorContains(t, err, "not a mysql:// URL", bad)
+		require.NotContains(t, err.Error(), "hunter2", "an error repeated the credential in %q", bad)
+	}
+	_, err := p.openSource(secrets.New("mysql://u:hunter2@db.internal:3306/"))
+	require.ErrorContains(t, err, "names no database")
+}

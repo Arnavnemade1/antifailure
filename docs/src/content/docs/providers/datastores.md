@@ -106,8 +106,13 @@ datastores:
 The variable holds `mysql://user:password@host:port/database`. A password
 holding `@`, `/` or `:` is percent encoded, as in any URL. Add `?tls=true` to
 verify the server's certificate; the default uses TLS whenever the server
-offers it without verifying it, and `tls=false` turns it off. The user needs
-`SELECT` on the database.
+offers it without verifying it, and `tls=false` turns it off. That default is
+the driver's `tls=preferred`, which falls back to an unencrypted connection
+when the server offers no TLS and accepts any certificate when it does, so a
+source reached over a network you do not control should say `?tls=true`. The
+user needs `SELECT` on the database. Any other form of address, a `mariadb://`
+URL, a `jdbc:` URL or a Go driver DSN, is refused rather than read as no
+source, so a typo cannot publish an empty golden that looks like a full one.
 
 A refresh reads every table inside one read only transaction, the way
 `mysqldump --single-transaction` does, so the golden is production at one

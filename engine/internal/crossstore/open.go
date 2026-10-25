@@ -107,11 +107,6 @@ func (c *clickHouseCatalog) Skipped() []string { return c.skipped }
 
 func (c *clickHouseCatalog) Close() error { return nil }
 
-// redactedConnectError keeps a connection string out of a message.
-//
-// A pgx dial failure quotes the URL it was given, password included, and that
-// message reaches a report and a log. What a reader needs is what went wrong,
-// and the variable name is already in the sentence this wraps.
 // mysqlCatalog reads a MySQL's schema with the provider's own reader, so the
 // check sees the tables masking would.
 type mysqlCatalog struct {
@@ -133,6 +128,11 @@ func (c *mysqlCatalog) Skipped() []string { return c.skipped }
 
 func (c *mysqlCatalog) Close() error { return nil }
 
+// redactedConnectError keeps a connection string out of a message.
+//
+// A pgx dial failure quotes the URL it was given, password included, and that
+// message reaches a report and a log. What a reader needs is what went wrong,
+// and the variable name is already in the sentence this wraps.
 func redactedConnectError(err error) error {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) && urlErr.Err != nil {

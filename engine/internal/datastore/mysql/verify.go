@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/antifailure/antifailure/engine/internal/secrets"
@@ -19,7 +20,9 @@ type ScanOptions struct {
 	// SampleSize is rows per column, and zero uses the scanner's default.
 	SampleSize int
 	// Unruled names the columns masking copied unchanged because no rule
-	// covered them.
+	// covered them, as database.table.column under the database the scan
+	// reads, which is what MaskResult.CopiedUnchanged carries. A name under any
+	// other database is refused rather than ignored.
 	Unruled []string
 	// Progress receives a line per table, and may be nil.
 	Progress func(string)
@@ -39,6 +42,9 @@ func Scan(ctx context.Context, url secrets.Value, opts ScanOptions) (verify.Repo
 	}
 	if s.database == "" {
 		return verify.Report{}, fmt.Errorf("datastore.mysql: the address names no database to scan")
+	}
+	if err := unruledUnder(s.database, opts.Unruled); err != nil {
+		return verify.Report{}, err
 	}
 	db, err := s.open(sessionPlain)
 	if err != nil {
@@ -99,4 +105,26 @@ func (scopedDialect) Columns() string {
 	return "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, COLUMN_TYPE FROM (" +
 		verify.MySQL.Columns() +
 		") AS listed WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME, COLUMN_NAME"
+}
+
+// unruledUnder refuses an unruled column named under a database other than the
+// one being scanned.
+//
+// The scanner decides whether a column a rule never covered is unruled by
+// comparing names, and a name that matches nothing is silently a ruled column.
+// That is exactly how a golden with an unread, unmasked secret in it was
+// published: masking named the columns by the source database and the scan by
+// the candidate. A name that cannot match is a caller that disagrees with the
+// scan about what the database is called, and that is refused here, before a
+// verdict built on it exists.
+func unruledUnder(database string, unruled []string) error {
+	for _, name := range unruled {
+		rest, ok := strings.CutPrefix(name, database+".")
+		if !ok || !strings.Contains(rest, ".") {
+			return fmt.Errorf("datastore.mysql: the column %s, which masking copied unchanged, "+
+				"is not named as database.table.column under %s, the database being scanned, "+
+				"so the scan could not tell it was unruled", name, database)
+		}
+	}
+	return nil
 }

@@ -41,6 +41,9 @@ const (
 	// nothing behind it, which lists as nothing, rather than a database
 	// nothing knows it made.
 	catalogDatabase = "af_catalog"
+	// placeholderSource is the scheme the conformance suite's stand in source
+	// uses. It names nothing, so a refresh given it copies nothing.
+	placeholderSource = "antifailure://"
 )
 
 // Provider implements provider.Datastore.
@@ -384,14 +387,29 @@ type sourceConn struct {
 // openSource opens the source a refresh copies, or returns nil when there is
 // none to copy.
 //
-// A source that is not a mysql:// address leaves the golden empty, which is the
-// answer the ClickHouse provider and the Docker Postgres one give a project that
-// has not connected production, and the conformance suite's placeholder source
-// is exactly that. A mysql:// address that names no database is an error: the
-// alternative is publishing an empty golden that looks like a full one.
+// None means no address at all, which is a project that has not connected
+// production, or the conformance suite's antifailure:// placeholder, which
+// stands for the same thing. Both leave the golden empty, the answer the
+// ClickHouse provider and the Docker Postgres one give, and the engine says so
+// out loud.
+//
+// Anything else is an address somebody meant, and it is read or refused. This
+// used to treat every address that was not mysql:// as none, so a
+// mariadb://, a jdbc:mysql:// or a Go driver DSN like user:pass@tcp(host)/shop,
+// each of them a real production that somebody configured, produced an empty
+// golden that verified clean and published looking exactly like a full one.
+// A mysql:// address that names no database is refused for the same reason.
 func (p *Provider) openSource(v secrets.Value) (*sourceConn, error) {
-	if v.IsZero() || !strings.HasPrefix(strings.TrimSpace(v.Reveal()), "mysql://") {
+	raw := strings.TrimSpace(v.Reveal())
+	if raw == "" || strings.HasPrefix(raw, placeholderSource) {
 		return nil, nil
+	}
+	if !strings.HasPrefix(raw, "mysql://") {
+		// The value is a credential, so it is not quoted back.
+		return nil, fmt.Errorf(
+			"datastore.mysql: the source address is not a mysql:// URL, so it cannot be read and " +
+				"the golden would hold nothing; a mariadb:// URL, a jdbc: URL or a driver DSN is " +
+				"not accepted. Write it as mysql://user:password@host:port/database")
 	}
 	s, err := parseURL(v)
 	if err != nil {

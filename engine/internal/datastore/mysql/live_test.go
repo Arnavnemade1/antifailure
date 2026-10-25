@@ -17,6 +17,7 @@ import (
 	"github.com/antifailure/antifailure/engine/internal/datastore/mysql"
 	"github.com/antifailure/antifailure/engine/internal/masking"
 	"github.com/antifailure/antifailure/engine/internal/secrets"
+	"github.com/antifailure/antifailure/engine/internal/verify"
 	"github.com/antifailure/antifailure/engine/pkg/provider"
 )
 
@@ -388,3 +389,145 @@ func TestCatalog_DescribesKeysReferencesAndComputedColumns(t *testing.T) {
 }
 
 func quoteDB(name string) string { return "`" + strings.ReplaceAll(name, "`", "``") + "`" }
+
+// A secret no rule covered and the scanner cannot read refuses the golden.
+//
+// The engine's own wiring, in miniature: masking names the source database as
+// its schema, and the scan is told which columns masking copied unchanged by
+// the names masking returned. Those two once disagreed about what the database
+// was called, shop.vault.signing_key against af_cand_<hash>.vault.signing_key,
+// so the scan matched no unruled column and counted every one as ruled. A
+// ruled column the scanner cannot read is a note, so bytes that are not UTF-8
+// in a column named like a key, which nothing masked, published.
+//
+// The column is signing_key rather than api_key because the default rules
+// hash an api_key, and this needs a column no rule reaches; the precondition
+// below proves that it is one.
+func TestRefresh_RefusesAnUnreadSecretNoRuleCovered(t *testing.T) {
+	server := requireServer(t)
+	srcName, src := source(t, server)
+	exec(t, src,
+		`CREATE TABLE vault (
+			id INT NOT NULL PRIMARY KEY,
+			signing_key VARBINARY(32) NOT NULL,
+			private_spot POINT NULL
+		) ENGINE=InnoDB`,
+		`INSERT INTO vault VALUES
+			(1, UNHEX('FF00FE01C3A9DEADBEEF'), ST_GeomFromText('POINT(1 2)')),
+			(2, UNHEX('C3FF28A0E2828A'), NULL)`)
+	sourceURL := secrets.New(strings.TrimSuffix(server.Reveal(), "/") + "/" + srcName)
+
+	p, err := mysql.New(mysql.Options{ServerURL: server, Name: "vault"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	refresh := func(rules *masking.RuleSet) (provider.GoldenVersion, mysql.MaskResult, verify.Report, error) {
+		var masked mysql.MaskResult
+		var report verify.Report
+		gv, err := p.RefreshGolden(ctx, provider.GoldenSpec{
+			SourceURL: sourceURL, RulesHash: "rules-vault", Provenance: "project:vault",
+			Mask: func(ctx context.Context, candidate secrets.Value) error {
+				var err error
+				masked, err = mysql.Mask(ctx, candidate, mysql.MaskOptions{
+					Key: liveKey(t), Rules: rules, RulesHash: "rules-vault",
+					Schema: mysql.DatabaseOf(sourceURL),
+				})
+				return err
+			},
+			Verify: func(ctx context.Context, candidate secrets.Value) (string, error) {
+				var err error
+				report, err = mysql.Scan(ctx, candidate, mysql.ScanOptions{
+					Unruled: masked.CopiedUnchanged, Now: time.Now,
+				})
+				if err != nil {
+					return "", err
+				}
+				if len(report.Findings) > 0 {
+					f := report.Findings[0]
+					return "", fmt.Errorf("%s.%s still holds %s", f.Table, f.Column, f.Detector)
+				}
+				if len(report.Skipped) > 0 {
+					return "", fmt.Errorf("the scan could not read %v", report.Skipped[0])
+				}
+				return fmt.Sprintf("scanned %d columns", report.Columns), nil
+			},
+		})
+		if err == nil {
+			t.Cleanup(func() { _ = p.DestroyGolden(context.Background(), gv.ID) })
+		}
+		return gv, masked, report, err
+	}
+
+	before, err := p.ListGoldens(ctx)
+	require.NoError(t, err)
+	unruled, err := masking.NewRuleSet([]masking.Rule{
+		{Column: "id", Transform: "preserve", Why: "A row number."},
+	})
+	require.NoError(t, err)
+	_, masked, report, err := refresh(unruled)
+	require.Len(t, masked.CopiedUnchanged, 2,
+		"precondition: both columns must be ones no rule covered, or this proves nothing")
+	require.ErrorContains(t, err, "vault.private_spot still holds "+verify.DetectorUnreadSensitive,
+		"an unmasked secret the scanner could not read was published")
+	var refused []string
+	for _, f := range report.Findings {
+		require.Equal(t, verify.DetectorUnreadSensitive, f.Detector)
+		refused = append(refused, f.Column)
+	}
+	require.Equal(t, []string{"private_spot", "signing_key"}, refused,
+		"the binary key and the spatial column must both be refused, each through its own path")
+	after, err := p.ListGoldens(ctx)
+	require.NoError(t, err)
+	require.Len(t, after, len(before), "a refused refresh published a golden")
+
+	// The control: the same data, with a person having decided both columns
+	// ship as they are. Ruled, unread is a note, and the golden publishes. If
+	// this refused too, the refusal above would be the scan failing on these
+	// types rather than the scan knowing nobody decided.
+	decided, err := masking.NewRuleSet([]masking.Rule{
+		{Column: "id", Transform: "preserve", Why: "A row number."},
+		{Column: "signing_key", Transform: "preserve", Why: "A test key, revoked."},
+		{Column: "private_spot", Transform: "preserve", Why: "A test point."},
+	})
+	require.NoError(t, err)
+	gv, masked, report, err := refresh(decided)
+	require.NoError(t, err)
+	require.True(t, gv.Verified)
+	require.Empty(t, masked.CopiedUnchanged)
+	require.Len(t, report.Unread, 2, "both columns are still unread, and now ruled")
+}
+
+// A source address in a form the provider does not read is refused before
+// anything is made, rather than taken to mean no source and published empty.
+func TestRefresh_RefusesASourceAddressItCannotRead(t *testing.T) {
+	server := requireServer(t)
+	srcName, src := source(t, server)
+	exec(t, src, `CREATE TABLE contacts (id INT PRIMARY KEY, email VARCHAR(255) NOT NULL)`,
+		`INSERT INTO contacts VALUES (1, 'a.person@acme-customers.com')`)
+	u, err := url.Parse(server.Reveal())
+	require.NoError(t, err)
+
+	p, err := mysql.New(mysql.Options{ServerURL: server, Name: "contacts"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close() })
+	ctx := context.Background()
+	before, err := p.Inventory(ctx)
+	require.NoError(t, err)
+
+	password, _ := u.User.Password()
+	for _, addr := range []string{
+		"mariadb://" + u.User.String() + "@" + u.Host + "/" + srcName,
+		u.User.Username() + ":" + password + "@tcp(" + u.Host + ")/" + srcName,
+	} {
+		_, err := p.RefreshGolden(ctx, provider.GoldenSpec{
+			SourceURL: secrets.New(addr), RulesHash: "rules-addr", Provenance: "project:contacts",
+			Verify: func(context.Context, secrets.Value) (string, error) { return "clean", nil },
+		})
+		require.ErrorContains(t, err, "not a mysql:// URL")
+	}
+	after, err := p.Inventory(ctx)
+	require.NoError(t, err)
+	require.Equal(t, len(before), len(after), "a refused source still made something")
+}

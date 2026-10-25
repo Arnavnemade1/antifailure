@@ -44,7 +44,10 @@ type MaskResult struct {
 	Tables int
 	// Unclassified are the columns no rule covered.
 	Unclassified []masking.Assignment
-	// CopiedUnchanged names the columns that ship exactly as they were.
+	// CopiedUnchanged names the columns that ship exactly as they were, as
+	// database.table.column under the database the URL names, which is the
+	// name the verification scan of that same database reports them by. NOT
+	// the schema masking derived its keys from: see unruledNames.
 	CopiedUnchanged []string
 }
 
@@ -93,7 +96,7 @@ func Mask(ctx context.Context, url secrets.Value, opts MaskOptions) (MaskResult,
 	}
 	plan := masking.BuildPlan(mt, opts.Rules.Assign(mt), opts.RulesHash)
 	res.Unclassified = plan.Unclassified
-	res.CopiedUnchanged = plan.CopiedUnchangedNames()
+	res.CopiedUnchanged = unruledNames(plan, s.database)
 	if !plan.Runnable() {
 		return res, aferrors.Coded(aferrors.AFMSK010, "detail", masking.DescribeProblems(plan.Problems))
 	}
@@ -112,6 +115,27 @@ func Mask(ctx context.Context, url secrets.Value, opts MaskOptions) (MaskResult,
 		progress(fmt.Sprintf("masked %s: %d rows", tp.Table.Name, n))
 	}
 	return res, nil
+}
+
+// unruledNames names the columns a plan copies unchanged under the database
+// they physically sit in.
+//
+// The plan knows every table by the source's name, because that is what the
+// keys are derived from, so plan.CopiedUnchangedNames says shop.users.api_key.
+// The scan that reads the candidate back lists its columns by the database it
+// is reading, af_cand_<hash>.users.api_key, and matches the two by string. They
+// never matched, so the scan counted every column as one a rule had decided,
+// and a secret it could not read, bytes that are not UTF-8 in a column named
+// like a key, became a note rather than a refusal and the golden published.
+// One name for one column is the fix, and it is the scan's, because the scan
+// is the one reading the rows.
+func unruledNames(plan masking.Plan, physical string) []string {
+	cols := plan.CopiedUnchanged()
+	out := make([]string, 0, len(cols))
+	for _, a := range cols {
+		out = append(out, physical+"."+a.Table.Name+"."+a.Column.Name)
+	}
+	return out
 }
 
 // rewritesKey reports whether the plan rewrites a column of the primary key.
