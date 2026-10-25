@@ -339,6 +339,47 @@ describe(
       assert.equal(Number(countmembers!.n), 0)
     })
 
+    /**
+     * The recordings an organization uploaded go with it, bytes and all.
+     *
+     * They are the most sensitive thing it ever sent here, a video of its
+     * application on the screen, and they are in this database, in
+     * artifact_chunks, beside the row that indexes them. The purge is one
+     * DELETE of the organization, so what removes them is the cascade, and
+     * that is measured here rather than read off the migration: a chunk left
+     * behind is a recording kept for a customer who asked for everything to
+     * be deleted, with no row left to say whose it was. Counted by the
+     * superuser, so row level security cannot hide a survivor.
+     */
+    it('the purge deletes the recordings the organization uploaded', async () => {
+      const [env] = await h.admin<{ id: string }[]>`
+        SELECT id FROM environments WHERE org_id = ${org.orgId} LIMIT 1`
+      const [run] = await h.admin<{ id: string }[]>`
+        INSERT INTO runs (org_id, environment_id, kind) VALUES (${org.orgId}, ${env!.id}, 'workflows')
+        RETURNING id`
+      const [artifact] = await h.admin<{ id: string }[]>`
+        INSERT INTO artifacts (org_id, run_id, kind, workflow, storage_key, backend, content_type,
+                               size_bytes, sha256, retained, expires_at)
+        VALUES (${org.orgId}, ${run!.id}, 'video', 'Sign in', 'pending', 'postgres', 'video/webm',
+                6, 'x', true, now() + interval '30 days')
+        RETURNING id`
+      await h.admin`UPDATE artifacts SET storage_key = ${'pg:' + artifact!.id} WHERE id = ${artifact!.id}`
+      await h.admin`
+        INSERT INTO artifact_chunks (org_id, artifact_id, seq, bytes, expires_at)
+        VALUES (${org.orgId}, ${artifact!.id}, 0, ${Buffer.from('secret')}, now() + interval '30 days')`
+      const held = async (table: 'artifacts' | 'artifact_chunks') => {
+        const [row] = await h.admin<{ n: string }[]>`
+          SELECT count(*) AS n FROM ${h.admin(table)} WHERE org_id = ${org.orgId}`
+        return Number(row!.n)
+      }
+      assert.equal(await held('artifact_chunks'), 1, 'the fixture stored no bytes')
+
+      const { deletion } = await request()
+      assert.equal(deletion.step, 'done', `stopped at ${deletion.step}`)
+      assert.equal(await held('artifacts'), 0, 'an artifact row outlived its organization')
+      assert.equal(await held('artifact_chunks'), 0, 'a recording\'s bytes outlived its organization')
+    })
+
     // -----------------------------------------------------------------------
     // Step 1, against work that is running
     // -----------------------------------------------------------------------

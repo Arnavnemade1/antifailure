@@ -554,7 +554,13 @@ const runsRouter = router({
       const c = ctx as OrgContext
       return c.pool.withTenant(c.tenant, async (db) => {
         const rows = await db.execute<ArtifactRow>(sql`
-          SELECT id, kind, step, workflow, content_type, size_bytes, sha256, retained, expires_at
+          -- Kept means retained AND not yet expired, by the database's clock,
+          -- which is the same test the download route applies. Without the
+          -- second half a file past its expiry that the sweep had not reached
+          -- yet was listed as kept, with an Open link that answered not found.
+          SELECT id, kind, step, workflow, content_type, size_bytes, sha256,
+                 (retained AND (expires_at IS NULL OR expires_at > now())) AS retained,
+                 expires_at
           FROM artifacts WHERE run_id = ${input.runId}
           ORDER BY workflow, step NULLS LAST, kind`)
         // size_bytes is a bigint, and the driver hands a bigint over as a

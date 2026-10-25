@@ -14,7 +14,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   ArtifactRefusal, KIND_POLICIES, bytesMatchType, contentDisposition, parseRange, readDeclaration,
 } from '../src/artifacts/policy.ts'
-import { ByteBudget, readExactly } from '../src/artifacts/routes.ts'
+import {
+  ByteBudget, DEFAULT_IN_FLIGHT_BYTES, DEFAULT_ORG_QUOTA_BYTES, artifactQuotaBytesFrom, readExactly,
+} from '../src/artifacts/routes.ts'
 import { ArtifactStores } from '../src/artifacts/store.ts'
 import { CHUNK_BYTES, PostgresArtifactStore } from '../src/artifacts/postgres-store.ts'
 import { sweepExpiredArtifacts } from '../src/artifacts/sweep.ts'
@@ -583,7 +585,45 @@ describe('artifacts over HTTP', { skip: hasDatabase ? false : 'no Postgres at AF
 
     const viewer = await signInAs(h, org, 'viewer')
     const gone = await h.fetch(`/v1/artifacts/${stored.body.id}`, { headers: { cookie: viewer.cookie } })
-    assert.equal(gone.status, 410)
+    assert.equal(gone.status, 404)
+  })
+
+  it('stops serving a file the moment it expires, before the sweep reaches it', async () => {
+    await setStorage(org, true)
+    const runId = `run_${randomUUID()}`
+    await startRun(org, token, runId)
+    const body = webm(2500, 9)
+    const stored = await upload(token, org, runId, body, { workflow: 'Past due' })
+    assert.equal(stored.status, 201, JSON.stringify(stored.body))
+    const viewer = await signInAs(h, org, 'viewer')
+    const open = () => h.fetch(`/v1/artifacts/${stored.body.id}`, { headers: { cookie: viewer.cookie } })
+
+    // Served while it is in date, which is what makes the refusal below
+    // about the expiry and not about the file.
+    const before = await open()
+    assert.equal(before.status, 200)
+    assert.ok(Buffer.from(await before.arrayBuffer()).equals(body))
+
+    // Past its expiry by the database's clock, with every byte still there
+    // and the row still saying retained: exactly the state between the expiry
+    // and the next sweep.
+    await h.admin`UPDATE artifacts SET expires_at = now() - interval '1 second' WHERE id = ${stored.body.id}`
+    assert.equal(await count(`SELECT count(*)::text AS n FROM artifact_chunks WHERE artifact_id = $1`, stored.body.id), 1)
+    assert.equal(await count(`SELECT count(*)::text AS n FROM artifacts WHERE id = $1 AND retained`, stored.body.id), 1)
+
+    const after = await open()
+    const missing = await h.fetch(`/v1/artifacts/${randomUUID()}`, { headers: { cookie: viewer.cookie } })
+    assert.equal(after.status, 404)
+    assert.equal(after.status, missing.status)
+    assert.deepEqual(await after.json(), await missing.json(), 'an expired file answers differently from a missing one')
+
+    // And the run page no longer lists it as kept, so it offers no link to it.
+    const listed = await callProcedure(h, viewer, 'runs.artifacts', 'query', {
+      runId: (await h.admin<{ id: string }[]>`SELECT run_id AS id FROM artifacts WHERE id = ${stored.body.id}`)[0]!.id,
+    })
+    const row = ((listed.body as any).result.data as Array<{ id: string; retained: boolean }>)
+      .find((a) => a.id === stored.body.id)
+    assert.equal(row?.retained, false)
   })
 
   it('does not reach an artifact that has not expired', async () => {
@@ -613,10 +653,16 @@ describe('artifacts over HTTP', { skip: hasDatabase ? false : 'no Postgres at AF
 describe('the organization quota', { skip: hasDatabase ? false : 'no Postgres at AF_TEST_DATABASE_URL' }, () => {
   let h: ApiHarness
   let org: Org
+  let t: string
 
   before(async () => {
     h = await startApi({ artifactLimits: { orgQuotaBytes: 5000 } })
     org = await seedOrg(h.admin, 'quota')
+    t = `aft_${randomUUID().replace(/-/g, '')}`
+    await h.admin`
+      INSERT INTO engine_tokens (org_id, name, token_hash, prefix)
+      VALUES (${org.orgId}, 'ci', ${createHash('sha256').update(t).digest()}, 'aft_test')`
+    await h.admin`UPDATE organizations SET artifact_uploads_enabled = true WHERE id = ${org.orgId}`
   })
 
   after(async () => {
@@ -624,12 +670,12 @@ describe('the organization quota', { skip: hasDatabase ? false : 'no Postgres at
     await h.close()
   })
 
-  it('refuses the upload that would take an organization past what it may keep', async () => {
-    const t = `aft_${randomUUID().replace(/-/g, '')}`
-    await h.admin`
-      INSERT INTO engine_tokens (org_id, name, token_hash, prefix)
-      VALUES (${org.orgId}, 'ci', ${createHash('sha256').update(t).digest()}, 'aft_test')`
-    await h.admin`UPDATE organizations SET artifact_uploads_enabled = true WHERE id = ${org.orgId}`
+  /** Each test starts from an organization that keeps nothing. */
+  async function empty(): Promise<void> {
+    await h.admin`DELETE FROM artifacts WHERE org_id = ${org.orgId}`
+  }
+
+  async function newRun(): Promise<string> {
     const runId = `run_${randomUUID()}`
     const started = await h.fetch('/v1/events', {
       method: 'POST',
@@ -640,19 +686,31 @@ describe('the organization quota', { skip: hasDatabase ? false : 'no Postgres at
       }] }),
     })
     assert.equal(started.status, 202)
+    return runId
+  }
 
-    const send = (body: Buffer, workflow: string) => h.fetch(
-      `/v1/environments/${org.envId}/runs/${runId}/artifacts`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${t}`, 'content-length': String(body.length),
-          'content-type': 'video/webm', 'x-artifact-kind': 'video',
-          'x-artifact-workflow': workflow, 'x-artifact-sha256': sha(body),
-        },
-        body,
-      })
-    assert.equal((await send(webm(3000), 'first')).status, 201)
-    const over = await send(webm(3000), 'second')
+  const send = (runId: string, body: Buffer, workflow: string) => h.fetch(
+    `/v1/environments/${org.envId}/runs/${runId}/artifacts`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${t}`, 'content-length': String(body.length),
+        'content-type': 'video/webm', 'x-artifact-kind': 'video',
+        'x-artifact-workflow': workflow, 'x-artifact-sha256': sha(body),
+      },
+      body,
+    })
+
+  const kept = async () => {
+    const [row] = await h.admin<{ n: string }[]>`
+      SELECT coalesce(sum(size_bytes), 0)::text AS n FROM artifacts WHERE org_id = ${org.orgId} AND retained`
+    return Number(row!.n)
+  }
+
+  it('refuses the upload that would take an organization past what it may keep', async () => {
+    await empty()
+    const runId = await newRun()
+    assert.equal((await send(runId, webm(3000), 'first')).status, 201)
+    const over = await send(runId, webm(3000), 'second')
     assert.equal(over.status, 507)
     const refusal = (await over.json()) as { code: string; error: string }
     assert.equal(refusal.code, 'quota')
@@ -661,5 +719,96 @@ describe('the organization quota', { skip: hasDatabase ? false : 'no Postgres at
     // to files stored after it changes and so frees nothing today.
     assert.match(refusal.error, /at most 0\.0 MiB of artifacts and holds 0\.0 MiB/)
     assert.doesNotMatch(refusal.error, /retention/)
+  })
+
+  // The orderings two uploads for two DIFFERENT runs of one organization can
+  // arrive in, each 3000 bytes against a quota of 5000, so that either fits
+  // alone and the two together do not. The lock that serialized them was per
+  // run, so different runs is the case it did not cover.
+
+  it('A then B, for different runs: the second is refused', async () => {
+    await empty()
+    const [a, b] = [await newRun(), await newRun()]
+    assert.equal((await send(a, webm(3000, 2), 'A')).status, 201)
+    assert.equal((await send(b, webm(3000, 3), 'B')).status, 507)
+    assert.equal(await kept(), 3000)
+  })
+
+  it('B then A, for different runs: the second is refused', async () => {
+    await empty()
+    const [a, b] = [await newRun(), await newRun()]
+    assert.equal((await send(b, webm(3000, 4), 'B')).status, 201)
+    assert.equal((await send(a, webm(3000, 5), 'A')).status, 507)
+    assert.equal(await kept(), 3000)
+  })
+
+  it('A and B at once, for different runs: one is kept and the quota holds', async () => {
+    await empty()
+    const [a, b] = [await newRun(), await newRun()]
+
+    // The interleaving that overshot, forced rather than hoped for. Holding
+    // an EXCLUSIVE lock on artifact_chunks stops each upload at its first
+    // chunk write, which is AFTER its quota check and its artifacts row. With
+    // nothing serializing the two, both reach that point having read the same
+    // empty total, both are waiting when the lock is released, and both
+    // commit. With them serialized per organization, the second waits before
+    // its quota check, and reads the first one's row once it is committed.
+    // Released only once two uploads are waiting on a lock, so the test is
+    // about the two arriving together and not about which one the event loop
+    // happened to run first.
+    // The uploads' promise is handed out wrapped, because a transaction
+    // callback that returns a promise is awaited before the COMMIT, and the
+    // COMMIT is what releases the uploads.
+    const { inFlight } = await h.admin.begin(async (tx) => {
+      await tx`LOCK TABLE artifact_chunks IN EXCLUSIVE MODE`
+      const inFlight = Promise.all([send(a, webm(3000, 6), 'A'), send(b, webm(3000, 7), 'B')])
+      const deadline = Date.now() + 15_000
+      for (;;) {
+        const [w] = await h.admin<{ n: string }[]>`
+          SELECT count(*)::text AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'`
+        if (Number(w!.n) >= 2) break
+        assert.ok(Date.now() < deadline, 'the two uploads never both reached a lock')
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      return { inFlight }
+    })
+    const results = await inFlight
+
+    const statuses = results.map((r) => r.status).sort()
+    assert.deepEqual(statuses, [201, 507], `both uploads answered ${statuses.join(' and ')}`)
+    assert.ok(await kept() <= 5000, `the organization keeps ${await kept()} bytes against a quota of 5000`)
+  })
+
+  it('A with no B: one upload that fits is kept', async () => {
+    await empty()
+    assert.equal((await send(await newRun(), webm(4000, 8), 'alone')).status, 201)
+    assert.equal(await kept(), 4000)
+  })
+
+  it('reports the quota it enforces, not the default', async () => {
+    const owner = await signInAs(h, org, 'owner')
+    const read = await callProcedure(h, owner, 'org.artifactStorage', 'query', {})
+    assert.equal((read.body as any).result.data.quotaBytes, 5000)
+  })
+})
+
+describe('the quota an installation sets', () => {
+  it('is 256 MiB unless AF_ARTIFACT_ORG_QUOTA_MIB says otherwise', () => {
+    assert.equal(DEFAULT_ORG_QUOTA_BYTES, 256 * 1024 * 1024)
+    assert.equal(artifactQuotaBytesFrom(undefined), DEFAULT_ORG_QUOTA_BYTES)
+    assert.equal(artifactQuotaBytesFrom(''), DEFAULT_ORG_QUOTA_BYTES)
+    assert.equal(artifactQuotaBytesFrom(' 1024 '), 1024 * 1024 * 1024)
+    assert.equal(artifactQuotaBytesFrom('1'), 1024 * 1024)
+  })
+
+  for (const bad of ['0', '-5', '1.5', '2GiB', 'lots', '1048577', '99999999']) {
+    it(`stops the process on ${JSON.stringify(bad)} rather than guessing`, () => {
+      assert.throws(() => artifactQuotaBytesFrom(bad), /AF_ARTIFACT_ORG_QUOTA_MIB must be a whole number/)
+    })
+  }
+
+  it('holds no more upload bodies in memory than two of the largest kind', () => {
+    assert.equal(DEFAULT_IN_FLIGHT_BYTES, 2 * KIND_POLICIES.video.maxBytes)
   })
 })

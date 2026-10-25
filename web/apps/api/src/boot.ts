@@ -77,6 +77,7 @@ import { startWebsiteRefreshWorker } from './website-refresh.ts'
 import { ArtifactStores } from './artifacts/store.ts'
 import { PostgresArtifactStore } from './artifacts/postgres-store.ts'
 import { sweepExpiredArtifacts } from './artifacts/sweep.ts'
+import { artifactQuotaBytesFrom, describeArtifactQuota } from './artifacts/routes.ts'
 
 function required(name: string, ...fallbacks: string[]): string {
   for (const n of [name, ...fallbacks]) {
@@ -340,6 +341,12 @@ export async function startControlPlane(hooks: BootHooks = {}): Promise<ControlP
   const trustedProxyHops = trustedProxyHopsFrom(process.env.AF_TRUSTED_PROXY_HOPS)
   console.log(describeTrustedProxyHops(trustedProxyHops))
 
+  // How much each organization may keep of the run artifacts it uploads. Read
+  // here, with the other limits, so a value that is not a number stops the
+  // process rather than becoming a quota of zero or of everything.
+  const artifactQuotaBytes = artifactQuotaBytesFrom(process.env.AF_ARTIFACT_ORG_QUOTA_MIB)
+  console.log(describeArtifactQuota(artifactQuotaBytes))
+
   // Read at start-up rather than on first use, so a secret of the wrong length
   // stops the process here instead of on the one request the feature exists for.
   //
@@ -582,6 +589,7 @@ export async function startControlPlane(hooks: BootHooks = {}): Promise<ControlP
     pool,
     adminPool,
     artifactStores,
+    artifactLimits: { orgQuotaBytes: artifactQuotaBytes },
     github,
     clock: systemClock,
     // The same value the seam handed the edition, not a second read of the

@@ -532,7 +532,10 @@ export async function buildExport(
       },
       {
         what: 'artifacts and reports',
-        why: 'they are files rather than rows, and they are already downloadable from the runs page',
+        why:
+          'they are files rather than rows. The recordings an organization chose to upload can be ' +
+          'downloaded from the runs page until the expiry each one was stored with, and deleting the ' +
+          'organization deletes them with everything else',
       },
       {
         what: 'anything from your database',

@@ -18,5 +18,9 @@ are whatever the organization decided.
 
 The bytes are kept in the control plane's Postgres database, behind a store
 interface that each artifact row names, so an object store can be added as a
-second backend later without moving the files already stored. See
+second backend later without moving the files already stored. Each organization
+keeps at most 256 MiB, which `AF_ARTIFACT_ORG_QUOTA_MIB` changes for a
+self-hosted installation, and a file stops being served the moment it expires
+rather than when the housekeeping sweep next removes it. Deleting an
+organization deletes its recordings with it. See
 [run recordings](/docs/guides/run-recordings).

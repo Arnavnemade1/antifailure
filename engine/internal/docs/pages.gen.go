@@ -14086,9 +14086,11 @@ another organization's artifact returns not found.
 ## How long they are kept
 
 Each file gets its expiry when it is stored: the organization's retention, by
-the database's clock. A housekeeping sweep deletes the bytes after that. The
-row stays and is listed as dropped, so the run's page shows that a recording
-existed rather than looking as if none was made.
+the database's clock. From that moment it is not served: opening it answers not
+found, the same as a file that never existed, and the run's page lists it as
+dropped, even if the housekeeping sweep has not reached it yet. The sweep then
+deletes the bytes. The row stays and is listed as dropped, so the run's page
+shows that a recording existed rather than looking as if none was made.
 
 A new retention applies to files stored after the change. Files already kept
 expire on the date they were stored with. Turning storage off stops new uploads
@@ -14096,11 +14098,15 @@ and leaves the files that are already kept until they expire.
 
 ## Limits
 
-An organization keeps at most 2 GiB of recordings. An upload that would pass
+An organization keeps at most 256 MiB of recordings. An upload that would pass
 that is refused, and the report says how much the organization holds. Space
-comes back as kept files expire.
+comes back as kept files expire. The check and the write happen under one lock
+per organization, so uploads from several runs at once cannot together keep
+more than the quota. A self-hosted installation can change the quota with
+` + "`" + `AF_ARTIFACT_ORG_QUOTA_MIB` + "`" + `; see the
+[control plane reference](/docs/reference/control-plane).
 
-One control plane process holds at most 192 MiB of uploads in memory at once.
+One control plane process holds at most 128 MiB of uploads in memory at once.
 When it is full it asks the engine to wait, and the engine retries. It also
 retries when the control plane has not yet received the run's own events,
 after sending any events it still holds. Each file gets four attempts. After two network failures in
@@ -14111,7 +14117,8 @@ a row the engine stops and leaves the rest on the machine.
 In the control plane's Postgres database, in one megabyte chunks in the
 ` + "`" + `artifact_chunks` + "`" + ` table. That has two consequences for a self-hosted
 installation. A database backup includes the recordings, so plan backup storage
-for up to 2 GiB per organization that turns this on. Restoring a backup also
+for up to 256 MiB per organization that turns this on, or for whatever
+` + "`" + `AF_ARTIFACT_ORG_QUOTA_MIB` + "`" + ` sets. Restoring a backup also
 restores the recordings it held.
 
 Each artifact row names the backend that holds its bytes, and the control plane
@@ -21961,6 +21968,7 @@ has the order for the four features whose credential Terraform must not hold.
 | ` + "`" + `AF_SELF_SERVE_SIGNUP` + "`" + ` | unset | Set to ` + "`" + `1` + "`" + ` to give somebody who signs in with no organization one of their own, on the free plan, owned by them. Unset, that person lands in no organization and waits for a GitHub App installation or an invitation, which is what happened before this existed. **Off by default**, and the direction is the argument rather than an opinion about convenience: what it grants is a tenant with real quotas and real compute against them, so on an installation where ` + "`" + `AF_SIGNIN_ALLOWLIST` + "`" + ` is unset it grants that to anybody who can reach the address, and forgetting the variable has to close the door rather than open it. The organization is named after the GitHub account and carries its login, so installing the App on that account later **adopts** the same organization rather than creating a second one beside it. The mode is printed at startup next to the allowlist's, because the two are one sentence: who may sign in, and whether there is anything on the other side of the door. Any value other than ` + "`" + `1` + "`" + `, ` + "`" + `0` + "`" + `, ` + "`" + `true` + "`" + `, ` + "`" + `false` + "`" + ` or unset stops the process. |
 | ` + "`" + `AF_INSECURE_COOKIES` + "`" + ` | unset | Set to ` + "`" + `1` + "`" + ` to drop the ` + "`" + `Secure` + "`" + ` attribute from cookies. For local development over plain HTTP and nothing else. |
 | ` + "`" + `AF_TRUSTED_PROXY_HOPS` + "`" + ` | ` + "`" + `1` + "`" + ` | How many proxies every request passes through before it reaches the process, which decides which entry of ` + "`" + `X-Forwarded-For` + "`" + ` is believed. Every proxy **appends** the peer address it saw to the end of that header and leaves whatever the caller sent in front, so the entries a deployment can trust are the last ones, one per proxy, and the client is the entry this many places from the end. ` + "`" + `1` + "`" + ` is the Azure Container Apps ingress alone, which is what the Terraform module builds, and one ingress controller, which is what the Helm chart assumes; Microsoft documents that only the rightmost entry is provided by Container Apps and everything else must be treated as the caller's. Set ` + "`" + `2` + "`" + ` when a Front Door, an Application Gateway or a WAF that also appends to the header sits in front of the ingress. It must be the number of proxies that **every** request passes through: a proxy some requests can skip is not a trusted hop, because a caller who reaches the inner one directly gets to write the entry this count attributes to the outer one. The address chosen here keys the sign-in, magic link, device code and OAuth callback rate limits and is what the sign-in audit trail records, so a count that is too high hands every caller their own limit and lets them write their own audit entry; a count that is too low limits everybody behind the same outer proxy together. When the header is absent, as it is for a direct connection or the local twin, or when the chosen entry is not an address, the request is limited in one shared bucket rather than exempted, and nothing is recorded as its address. A value that is not a whole number from 1 to 16 stops the process at startup. |
+| ` + "`" + `AF_ARTIFACT_ORG_QUOTA_MIB` + "`" + ` | ` + "`" + `256` + "`" + ` | How many MiB of uploaded run recordings each organization may keep at once, counted across every file it holds that has not been removed. The recordings are stored in this control plane's own database, so the quota is what keeps one organization from filling the volume every other organization's runs and audit log share: at the default, a 64 GiB database holds the full quota of 256 organizations. Raise it only with the database's storage. An upload that would pass it is refused with the sizes, and room comes back as files expire. The value is printed at startup. A value that is not a whole number from 1 to 1048576 stops the process at startup. See [run recordings](/docs/guides/run-recordings). |
 | ` + "`" + `AF_MIGRATE` + "`" + ` | unset | Set to ` + "`" + `1` + "`" + ` to apply migrations at startup. Requires ` + "`" + `AF_MIGRATION_DATABASE_URL` + "`" + `. |
 | ` + "`" + `AF_MIGRATION_DATABASE_URL` + "`" + ` | unset | A connection string for a role that may run DDL. |
 | ` + "`" + `AF_VERSION` + "`" + ` | ` + "`" + `dev` + "`" + ` | The build's version, reported by ` + "`" + `/readyz` + "`" + `. Stamped into the image at build time; setting it by hand only makes the endpoint lie. |
@@ -28691,7 +28699,7 @@ the bytes are and not who may read them.
 
 **How long.** 30 days unless the organization chooses between 1 and 365. The
 expiry is computed by the database's clock when the file is stored, so a change
-applies to files stored after it, and a sweep deletes the bytes once it passes. The row stays, marked dropped, so a run's page
+applies to files stored after it. Once it passes the file is not served, and a sweep deletes the bytes. The row stays, marked dropped, so a run's page
 lists the recording as dropped rather than as never made.
 
 **Who can open one.** A signed-in member of the organization who can view

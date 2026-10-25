@@ -36,11 +36,71 @@ import {
 } from './policy.ts'
 import type { ArtifactStores } from './store.ts'
 
-/** The default for how much one organization may keep, retained, at once. */
-export const DEFAULT_ORG_QUOTA_BYTES = 2 * 1024 * 1024 * 1024
+const MIB = 1024 * 1024
 
-/** The default for how many upload bytes one process holds at once. */
-export const DEFAULT_IN_FLIGHT_BYTES = 192 * 1024 * 1024
+/**
+ * The default for how much one organization may keep, retained, at once.
+ *
+ * 256 MiB, because the bytes live in the control plane's own database, which
+ * every organization shares. Production's is 64 GiB (database_storage_mb in
+ * production.tfvars), and at the 2 GiB this started at, thirty two
+ * organizations turning storage on would have filled it, with the runs,
+ * events and audit log of every other organization in the same volume. At
+ * 256 MiB that is two hundred and fifty six, and a run that fails keeps a
+ * video, a trace and a screenshot per failed workflow, a few megabytes each,
+ * so it is still dozens of failed runs per organization inside a thirty day
+ * retention. AF_ARTIFACT_ORG_QUOTA_MIB changes it for an installation whose
+ * database is sized for more; see artifactQuotaBytesFrom.
+ */
+export const DEFAULT_ORG_QUOTA_BYTES = 256 * MIB
+
+/** The largest quota AF_ARTIFACT_ORG_QUOTA_MIB may set, which is a terabyte. */
+export const MAX_ORG_QUOTA_MIB = 1024 * 1024
+
+/**
+ * The default for how many upload bytes one process holds at once.
+ *
+ * 128 MiB. A body is held once, in the one buffer readExactly allocates at its
+ * declared length, and the store writes it a megabyte at a time, so an upload
+ * costs its own size plus a few megabytes of encoding while a chunk is on the
+ * wire. 128 MiB is two of the largest kind, a 64 MiB video or trace, at once,
+ * and an eighth of the 1 GiB a control plane container is given (app_memory),
+ * which leaves the rest for the V8 heap, the connection pools and every other
+ * request the process is serving. It was 192 MiB, which was a fifth of the
+ * container spent on one feature. It is also half of what one organization
+ * may keep at all, so the budget, not the quota, is never what makes an
+ * organization's normal burst after a run wait.
+ */
+export const DEFAULT_IN_FLIGHT_BYTES = 128 * MIB
+
+/**
+ * The organization quota from AF_ARTIFACT_ORG_QUOTA_MIB, in bytes.
+ *
+ * Unset or blank is the default. Anything else must be a whole number of MiB
+ * from 1 to MAX_ORG_QUOTA_MIB, and a value that is not stops the process at
+ * startup, the way AF_TRUSTED_PROXY_HOPS does: a quota misread as zero refuses
+ * every upload, and one misread as unbounded lets one organization fill the
+ * database, and neither should be discovered by a customer.
+ */
+export function artifactQuotaBytesFrom(value: string | undefined | null): number {
+  const raw = value?.trim()
+  if (!raw) return DEFAULT_ORG_QUOTA_BYTES
+  const refuse = () => new Error(
+    `AF_ARTIFACT_ORG_QUOTA_MIB must be a whole number of MiB from 1 to ${MAX_ORG_QUOTA_MIB}; ` +
+    `received ${JSON.stringify(value)}.`)
+  if (!/^\d{1,7}$/.test(raw)) throw refuse()
+  const mib = Number(raw)
+  if (mib < 1 || mib > MAX_ORG_QUOTA_MIB) throw refuse()
+  return mib * MIB
+}
+
+/** What the process says about the quota at startup, so it is never a guess. */
+export function describeArtifactQuota(bytes: number): string {
+  const mib = Math.round(bytes / MIB)
+  return bytes === DEFAULT_ORG_QUOTA_BYTES
+    ? `each organization may keep ${mib} MiB of run artifacts (AF_ARTIFACT_ORG_QUOTA_MIB is not set)`
+    : `each organization may keep ${mib} MiB of run artifacts (AF_ARTIFACT_ORG_QUOTA_MIB=${mib})`
+}
 
 /** How long a body may take to arrive once reading has started. */
 export const DEFAULT_BODY_DEADLINE_MS = 5 * 60 * 1000
@@ -308,9 +368,21 @@ export function mountArtifacts<E extends Env>(app: Hono<E>, options: ArtifactRou
 
       const now = clock.now()
       const record = await pool.withTenant(tenant, async (db) => {
-        // One upload per run at a time from here, so two retries racing each
-        // other cannot both pass the checks above and both write.
-        await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'artifact:' + runRow}, 0))`)
+        // One upload per ORGANIZATION at a time from here to the commit, so
+        // that the quota read below and the insert that spends it are one step
+        // for every upload that could spend the same quota. This was a lock per
+        // run, which kept two retries of one file from both writing, and let
+        // two uploads for two different runs of one organization both read the
+        // same total, both pass, and together keep up to twice the quota. A
+        // lock per organization covers both cases, since a run belongs to one
+        // organization, and it is the only lock taken here, so there is no
+        // second one to acquire in a different order.
+        //
+        // It is held while the chunks are written, which serializes one
+        // organization's writes and nobody else's. That is the point rather
+        // than a cost: a write it lets through concurrently is one the quota
+        // did not see.
+        await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'artifact-org:' + engine.orgId}, 0))`)
         const again = await db.execute<{
           id: string; kind: string; workflow: string; step: number | null; content_type: string | null
           size_bytes: string | null; sha256: string | null; expires_at: Date | string | null
@@ -416,10 +488,18 @@ export function mountArtifacts<E extends Env>(app: Hono<E>, options: ArtifactRou
         FROM artifacts a
         JOIN runs r ON r.id = a.run_id
         LEFT JOIN environments e ON e.id = r.environment_id
-        WHERE a.id = ${id}::uuid`))
+        WHERE a.id = ${id}::uuid
+          -- Past its expiry is gone, whether or not the sweep has reached it
+          -- yet. The sweep runs on an interval, and before this a file was
+          -- served for as long as that interval left it on disk, past the date
+          -- the organization was told it would be removed. Read by the
+          -- database's clock, the one the sweep's own policy reads, so the
+          -- two can never disagree about whether a file has expired.
+          AND (a.expires_at IS NULL OR a.expires_at > now())`))
     const row = rows[0]
     // The same answer for another organization's artifact as for none at all,
-    // so this cannot be used to ask whether an identifier exists elsewhere.
+    // so this cannot be used to ask whether an identifier exists elsewhere,
+    // and the same again for one that has expired.
     if (!row) return c.json({ error: 'No artifact with that identifier.' }, 404)
 
     const allowed = await permits({

@@ -47,7 +47,7 @@ export const artifactSettings = {
         // gets NaN from the next field it treats the same way.
         usedBytes: Number(row?.used ?? 0),
         kept: Number(row?.kept ?? 0),
-        quotaBytes: DEFAULT_ORG_QUOTA_BYTES,
+        quotaBytes: c.artifactQuotaBytes ?? DEFAULT_ORG_QUOTA_BYTES,
         minRetentionDays: MIN_RETENTION_DAYS,
         maxRetentionDays: MAX_RETENTION_DAYS,
       }

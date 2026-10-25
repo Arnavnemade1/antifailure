@@ -116,6 +116,15 @@ export interface Context {
    *  reaches the route that writes the plan is an org owner rather than the
    *  operator. See hosted.ts. */
   operatorSetsPlan: boolean
+  /**
+   * How many retained artifact bytes an organization may keep, which is what
+   * the upload route enforces, so the settings page reports the same number a
+   * refusal names. Unset means DEFAULT_ORG_QUOTA_BYTES, which is what the
+   * route enforces when nothing configured it either: the server sets this
+   * from the same value it hands the route, and only a test building a context
+   * by hand leaves it out.
+   */
+  artifactQuotaBytes?: number
   /** Null for an unauthenticated request. */
   actor: Actor | null
   /**

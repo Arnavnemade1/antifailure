@@ -173,7 +173,7 @@ import { validateLead, recordLead, leadMessage, type LeadNotifier } from './ente
 import { mountApplicationRoutes } from './recruitment/routes.ts'
 import { mountWebsitePublished } from './admin/website-public.ts'
 import { mountWebsiteMedia, websiteMediaUploadGuard } from './admin/website-media.ts'
-import { mountArtifacts, type ArtifactRouteOptions } from './artifacts/routes.ts'
+import { DEFAULT_ORG_QUOTA_BYTES, mountArtifacts, type ArtifactRouteOptions } from './artifacts/routes.ts'
 import { ArtifactStores } from './artifacts/store.ts'
 import { PostgresArtifactStore } from './artifacts/postgres-store.ts'
 import {
@@ -608,6 +608,9 @@ export function createServer(options: ServerOptions) {
       counter: metrics.controlPlaneFailures,
     })
   const hostedRequiredPlan = options.hostedRequiredPlan ?? null
+  // The one value the upload route enforces and the settings page reports, so
+  // the page can never show a quota other than the one a refusal names.
+  const artifactQuotaBytes = options.artifactLimits?.orgQuotaBytes ?? DEFAULT_ORG_QUOTA_BYTES
   const operatorSetsPlan = options.operatorSetsPlan ?? false
   // Every cross origin route on this server reads THIS, through matchSiteOrigin
   // and nothing else. Empty means no browser on another origin is answered,
@@ -1085,7 +1088,8 @@ export function createServer(options: ServerOptions) {
       appBaseUrl: options.appBaseUrl ?? '', mailer: options.emailSignIn?.mailer ?? null,
       productName: options.emailSignIn?.productName ?? 'Antifailure', analytics,
       analyticsOperatorOrgSlug: options.analyticsOperatorOrgSlug ?? null,
-      hostedRequiredPlan, operatorSetsPlan, admin: null, adminPool: null, origin: 'api',
+      hostedRequiredPlan, operatorSetsPlan, artifactQuotaBytes, admin: null, adminPool: null,
+      origin: 'api',
     },
     actorFrom: async (cookie) => {
       const session = await sessionFrom(cookie)
@@ -1965,6 +1969,7 @@ export function createServer(options: ServerOptions) {
     stores: options.artifactStores ?? new ArtifactStores(new PostgresArtifactStore()),
     hostedRequiredPlan,
     ...options.artifactLimits,
+    orgQuotaBytes: artifactQuotaBytes,
   })
 
   app.options('/v1/leads', (c) => {
@@ -3655,6 +3660,7 @@ export function createServer(options: ServerOptions) {
           analyticsOperatorOrgSlug: options.analyticsOperatorOrgSlug ?? null,
           hostedRequiredPlan,
           operatorSetsPlan,
+          artifactQuotaBytes,
           actor,
           origin: 'web',
           requestId: c.get('requestId') ?? null,

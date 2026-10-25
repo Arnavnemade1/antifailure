@@ -165,7 +165,7 @@ the bytes are and not who may read them.
 
 **How long.** 30 days unless the organization chooses between 1 and 365. The
 expiry is computed by the database's clock when the file is stored, so a change
-applies to files stored after it, and a sweep deletes the bytes once it passes. The row stays, marked dropped, so a run's page
+applies to files stored after it. Once it passes the file is not served, and a sweep deletes the bytes. The row stays, marked dropped, so a run's page
 lists the recording as dropped rather than as never made.
 
 **Who can open one.** A signed-in member of the organization who can view

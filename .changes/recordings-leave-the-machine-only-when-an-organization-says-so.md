@@ -18,7 +18,10 @@ the operator's read role has its default read grant revoked on them, and the
 sweeper that expires them can read only the columns it needs. A download needs
 a signed-in member who can see the run's environment, answers another
 organization's artifact as not found, and is served with a sandboxing
-`Content-Security-Policy`, `nosniff` and `no-store`.
+`Content-Security-Policy`, `nosniff` and `no-store`. A file past its expiry is answered
+as not found from that moment, by the database's clock, rather than served
+until the sweep removes its bytes, and deleting the organization deletes its
+recordings.
 
 The trust boundary page now lists run recordings as opt in rather than as never
 leaving the machine, and says what a recording can carry.

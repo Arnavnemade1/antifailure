@@ -83,9 +83,11 @@ another organization's artifact returns not found.
 ## How long they are kept
 
 Each file gets its expiry when it is stored: the organization's retention, by
-the database's clock. A housekeeping sweep deletes the bytes after that. The
-row stays and is listed as dropped, so the run's page shows that a recording
-existed rather than looking as if none was made.
+the database's clock. From that moment it is not served: opening it answers not
+found, the same as a file that never existed, and the run's page lists it as
+dropped, even if the housekeeping sweep has not reached it yet. The sweep then
+deletes the bytes. The row stays and is listed as dropped, so the run's page
+shows that a recording existed rather than looking as if none was made.
 
 A new retention applies to files stored after the change. Files already kept
 expire on the date they were stored with. Turning storage off stops new uploads
@@ -93,11 +95,15 @@ and leaves the files that are already kept until they expire.
 
 ## Limits
 
-An organization keeps at most 2 GiB of recordings. An upload that would pass
+An organization keeps at most 256 MiB of recordings. An upload that would pass
 that is refused, and the report says how much the organization holds. Space
-comes back as kept files expire.
+comes back as kept files expire. The check and the write happen under one lock
+per organization, so uploads from several runs at once cannot together keep
+more than the quota. A self-hosted installation can change the quota with
+`AF_ARTIFACT_ORG_QUOTA_MIB`; see the
+[control plane reference](/docs/reference/control-plane).
 
-One control plane process holds at most 192 MiB of uploads in memory at once.
+One control plane process holds at most 128 MiB of uploads in memory at once.
 When it is full it asks the engine to wait, and the engine retries. It also
 retries when the control plane has not yet received the run's own events,
 after sending any events it still holds. Each file gets four attempts. After two network failures in
@@ -108,7 +114,8 @@ a row the engine stops and leaves the rest on the machine.
 In the control plane's Postgres database, in one megabyte chunks in the
 `artifact_chunks` table. That has two consequences for a self-hosted
 installation. A database backup includes the recordings, so plan backup storage
-for up to 2 GiB per organization that turns this on. Restoring a backup also
+for up to 256 MiB per organization that turns this on, or for whatever
+`AF_ARTIFACT_ORG_QUOTA_MIB` sets. Restoring a backup also
 restores the recordings it held.
 
 Each artifact row names the backend that holds its bytes, and the control plane
