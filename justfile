@@ -2225,21 +2225,22 @@ changecheck:
 
 # Nothing this repository created is still running.
 #
-# The machine's ClickHouse is the one exception, and it is an exception rather
-# than an oversight. A store server is not an environment resource: goldens and
-# branches are databases on it, several environments share one, and `af down`
-# deliberately leaves it running because starting it costs the better part of a
-# minute and the next `af up` would pay that again. There is exactly one, under
-# a fixed name, so it cannot accumulate, and every branch and every golden
-# inside it is still swept by the suites' own leak checks.
+# The machine's ClickHouse and its MySQL are the exceptions, and they are
+# exceptions rather than oversights. A store server is not an environment
+# resource: goldens and branches are databases on it, several environments
+# share one, and `af down` deliberately leaves it running because starting it
+# costs the better part of a minute and the next `af up` would pay that again.
+# There is exactly one per engine, under a fixed name, so it cannot accumulate,
+# and every branch and every golden inside it is still swept by the suites' own
+# leak checks.
 #
-# docker ps has no label!= filter, so the kind is formatted out and the one
-# exception is dropped here rather than by the daemon.
+# docker ps has no label!= filter, so the kind is formatted out and the
+# exceptions are dropped here rather than by the daemon.
 leaks:
     #!/usr/bin/env bash
     managed=$(docker ps -a --filter label=dev.antifailure.managed \
       --format '{{{{.ID}} {{{{.Names}} {{{{.Label "dev.antifailure.kind"}}')
-    leaked=$(printf '%s\n' "$managed" | grep -v ' clickhouse-server$' | grep . || true)
+    leaked=$(printf '%s\n' "$managed" | grep -v -E ' (clickhouse|mysql)-server$' | grep . || true)
     left=$(printf '%s' "$leaked" | grep -c . || true)
     nets=$(docker network ls -q --filter label=dev.antifailure.managed | wc -l | tr -d ' ')
     echo "containers: $left, networks: $nets"
