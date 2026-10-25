@@ -15,7 +15,8 @@ import {
   ArtifactRefusal, KIND_POLICIES, bytesMatchType, contentDisposition, parseRange, readDeclaration,
 } from '../src/artifacts/policy.ts'
 import {
-  ByteBudget, DEFAULT_IN_FLIGHT_BYTES, DEFAULT_ORG_QUOTA_BYTES, artifactQuotaBytesFrom, readExactly,
+  ByteBudget, DEFAULT_IN_FLIGHT_BYTES, DEFAULT_ORG_IN_FLIGHT_BYTES, DEFAULT_ORG_QUOTA_BYTES,
+  OrgByteBudgets, artifactQuotaBytesFrom, readExactly,
 } from '../src/artifacts/routes.ts'
 import { ArtifactStores } from '../src/artifacts/store.ts'
 import { CHUNK_BYTES, PostgresArtifactStore } from '../src/artifacts/postgres-store.ts'
@@ -209,6 +210,58 @@ describe('reading exactly the declared body', () => {
     } as RequestInit)
     await assert.rejects(readExactly(stalled, 10, 50),
       (err: unknown) => err instanceof ArtifactRefusal && err.code === 'too_slow')
+  })
+
+  it('cuts off a body that stops arriving at the idle timeout, not the total deadline', async () => {
+    const stalled = new Request('http://x.test/', {
+      method: 'POST',
+      body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1, 2, 3])) } }),
+      duplex: 'half',
+    } as RequestInit)
+    const began = Date.now()
+    await assert.rejects(
+      readExactly(stalled, 10, 3000, { idleMs: 150, minBytesPerSecond: 0, graceMs: 60_000 }),
+      (err: unknown) => err instanceof ArtifactRefusal && err.code === 'too_slow' && /No part/.test(err.message))
+    assert.ok(Date.now() - began < 2000, `took ${Date.now() - began} ms against an idle timeout of 150`)
+  })
+
+  it('cuts off a body that keeps trickling below the minimum rate', async () => {
+    let timer: NodeJS.Timeout | undefined
+    const trickle = new Request('http://x.test/', {
+      method: 'POST',
+      // A byte every 20 ms, so the idle timeout never fires and only the rate can.
+      body: new ReadableStream({
+        start(c) { timer = setInterval(() => c.enqueue(new Uint8Array([7])), 20) },
+        cancel() { clearInterval(timer) },
+      }),
+      duplex: 'half',
+    } as RequestInit)
+    const began = Date.now()
+    try {
+      await assert.rejects(
+        readExactly(trickle, 100_000, 3000, { idleMs: 1000, minBytesPerSecond: 1000, graceMs: 100 }),
+        (err: unknown) => err instanceof ArtifactRefusal && err.code === 'too_slow' && /more slowly/.test(err.message))
+    } finally {
+      clearInterval(timer)
+    }
+    assert.ok(Date.now() - began < 2500, `took ${Date.now() - began} ms`)
+  })
+})
+
+describe('the share of the in-flight budget one organization may hold', () => {
+  it('is one reservation of the largest kind, half the process budget', () => {
+    assert.equal(DEFAULT_ORG_IN_FLIGHT_BYTES, KIND_POLICIES.video.maxBytes)
+    assert.ok(DEFAULT_ORG_IN_FLIGHT_BYTES < DEFAULT_IN_FLIGHT_BYTES)
+  })
+
+  it('counts each organization separately and gives back what it took', () => {
+    const b = new OrgByteBudgets(100)
+    assert.equal(b.reserve('a', 60), true)
+    assert.equal(b.reserve('a', 60), false, 'one organization went past its share')
+    assert.equal(b.reserve('b', 100), true, 'another organization was refused because of the first')
+    b.release('a', 60)
+    assert.equal(b.inUse('a'), 0)
+    assert.equal(b.reserve('a', 100), true)
   })
 })
 
@@ -810,5 +863,155 @@ describe('the quota an installation sets', () => {
 
   it('holds no more upload bodies in memory than two of the largest kind', () => {
     assert.equal(DEFAULT_IN_FLIGHT_BYTES, 2 * KIND_POLICIES.video.maxBytes)
+  })
+})
+
+describe('uploads in flight', { skip: hasDatabase ? false : 'no Postgres at AF_TEST_DATABASE_URL' }, () => {
+  let h: ApiHarness
+  let a: Org
+  let b: Org
+  let c: Org
+  const tokens = new Map<string, string>()
+  const IDLE_MS = 1500
+
+  before(async () => {
+    // A process budget of two uploads and an organization share of one, with
+    // an idle timeout short enough to wait for and no minimum rate to speak of.
+    h = await startApi({ artifactLimits: {
+      inFlightBytes: 10_000, orgInFlightBytes: 5000,
+      // A total deadline the test can outwait, so that an upload the idle
+      // timeout failed to stop ends anyway, late, and fails the timing
+      // assertion rather than hanging the suite.
+      bodyDeadlineMs: 6000,
+      bodyPace: { idleMs: IDLE_MS, minBytesPerSecond: 1, graceMs: 60_000 },
+    } })
+    a = await seedOrg(h.admin, 'flight-a')
+    b = await seedOrg(h.admin, 'flight-b')
+    c = await seedOrg(h.admin, 'flight-c')
+    for (const o of [a, b, c]) {
+      const t = `aft_${randomUUID().replace(/-/g, '')}`
+      await h.admin`
+        INSERT INTO engine_tokens (org_id, name, token_hash, prefix)
+        VALUES (${o.orgId}, 'ci', ${createHash('sha256').update(t).digest()}, 'aft_test')`
+      await h.admin`UPDATE organizations SET artifact_uploads_enabled = true WHERE id = ${o.orgId}`
+      tokens.set(o.orgId, t)
+    }
+  })
+
+  after(async () => {
+    await dropOrg(h.admin, a.orgId)
+    await dropOrg(h.admin, b.orgId)
+    await dropOrg(h.admin, c.orgId)
+    await h.close()
+  })
+
+  async function newRun(o: Org): Promise<string> {
+    const runId = `run_${randomUUID()}`
+    const res = await h.fetch('/v1/events', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${tokens.get(o.orgId)}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ events: [{
+        id: randomUUID(), type: 'run.started', envId: o.envId, sequence: 1,
+        occurredAt: h.clock.now().toISOString(), payload: { run_id: runId },
+      }] }),
+    })
+    assert.equal(res.status, 202)
+    return runId
+  }
+
+  /** An upload of `size` bytes whose body is whatever `body` streams. */
+  function send(o: Org, runId: string, size: number, digest: string, body: RequestInit['body'], workflow: string) {
+    return h.fetch(`/v1/environments/${o.envId}/runs/${runId}/artifacts`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${tokens.get(o.orgId)}`, 'content-length': String(size),
+        'content-type': 'video/webm', 'x-artifact-kind': 'video',
+        'x-artifact-workflow': workflow, 'x-artifact-sha256': digest,
+      },
+      body,
+      duplex: 'half',
+    } as RequestInit)
+  }
+
+  /** The first bytes of a 5000 byte video, and then nothing, ever. */
+  function stalled(o: Org, runId: string, workflow: string) {
+    const whole = webm(5000, 11)
+    return send(o, runId, 5000, sha(whole), new ReadableStream({
+      start(c) { c.enqueue(new Uint8Array(whole.subarray(0, 100))) },
+    }), workflow)
+  }
+
+  function complete(o: Org, runId: string, workflow: string, seed: number) {
+    const whole = webm(5000, seed)
+    return send(o, runId, 5000, sha(whole), whole, workflow)
+  }
+
+  it('one organization holding its whole share does not refuse another organization', async () => {
+    const run = await newRun(a)
+    // Two uploads from A that will never finish. Without a share per
+    // organization, the two together hold the whole process budget and B is
+    // told the server is busy for as long as A cares to keep them open.
+    const first = stalled(a, run, 'hog one')
+    const second = stalled(a, run, 'hog two')
+    // B starts only once both of A's requests have had time to pass their
+    // checks and reserve, which takes a few milliseconds, and well inside the
+    // idle timeout that would release them. B arriving first would take one
+    // of the two slots itself and prove nothing about A.
+    await new Promise((r) => setTimeout(r, 400))
+    const fromB = await complete(b, await newRun(b), 'innocent', 12)
+    assert.equal(fromB.status, 201, `B was answered ${fromB.status}: ${await fromB.text()}`)
+
+    // A's own second upload is what was refused, with the shape the engine
+    // already retries on.
+    const answers = await Promise.all([first, second])
+    const refused = answers.find((r) => r.status === 429)
+    assert.ok(refused, `A's uploads were answered ${answers.map((r) => r.status).join(' and ')}`)
+    assert.equal(refused.headers.get('retry-after'), '10')
+    assert.match(((await refused.json()) as { error: string }).error, /one organization may send at once/)
+  })
+
+  it('a stalled upload gives its reservation back at the idle timeout', async () => {
+    const run = await newRun(a)
+    const began = Date.now()
+    const res = await stalled(a, run, 'stalls')
+    const took = Date.now() - began
+    assert.equal(res.status, 400)
+    assert.equal(((await res.json()) as { code: string }).code, 'too_slow')
+    assert.ok(took < IDLE_MS + 2000, `a stalled upload held its reservation for ${took} ms`)
+    // Given back, both A's share and the process's: a whole share fits again.
+    assert.equal((await complete(a, run, 'after the stall', 13)).status, 201)
+  })
+
+  it('a refusal by the full process budget gives back the organization share it took', async () => {
+    // A and B each hold one stalled upload, which fills the process budget,
+    // so C's upload passes its own organization's share and is refused by
+    // the process. If that refusal kept C's share, C would be refused as an
+    // organization over its share for the life of the process.
+    const holdA = stalled(a, await newRun(a), 'fills a')
+    const holdB = stalled(b, await newRun(b), 'fills b')
+    await new Promise((r) => setTimeout(r, 400))
+    const runC = await newRun(c)
+    const refused = await complete(c, runC, 'no room', 16)
+    assert.equal(refused.status, 429)
+    assert.match(((await refused.json()) as { error: string }).error, /This server is already receiving/)
+    await Promise.all([holdA, holdB])
+    const after = await complete(c, runC, 'room again', 17)
+    assert.equal(after.status, 201, `C was answered ${after.status}: ${await after.text()}`)
+  })
+
+  it('an upload whose client goes away gives its reservation back', async () => {
+    const run = await newRun(a)
+    let fail: (e: Error) => void = () => {}
+    const whole = webm(5000, 14)
+    const pending = send(a, run, 5000, sha(whole), new ReadableStream({
+      start(c) {
+        c.enqueue(new Uint8Array(whole.subarray(0, 100)))
+        fail = (e) => c.error(e)
+      },
+    }), 'abandoned')
+    await new Promise((r) => setTimeout(r, 50))
+    fail(new Error('the client disconnected'))
+    assert.equal((await pending).status, 400)
+    assert.equal((await complete(a, run, 'after the abort', 15)).status, 201)
   })
 })

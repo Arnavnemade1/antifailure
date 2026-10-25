@@ -118,7 +118,10 @@ export interface StartApiOptions {
   authLimit?: { rate: number; burst: number }
   /** The artifact quota, memory budget and body deadline, for a suite that
    *  needs them small enough to reach. */
-  artifactLimits?: { orgQuotaBytes?: number; inFlightBytes?: number; bodyDeadlineMs?: number }
+  artifactLimits?: {
+    orgQuotaBytes?: number; inFlightBytes?: number; orgInFlightBytes?: number; bodyDeadlineMs?: number
+    bodyPace?: { idleMs: number; minBytesPerSecond: number; graceMs: number }
+  }
   /** Who may sign in. Undefined leaves the server open, which is its default. */
   signInAllowlist?: ReadonlySet<string> | null
   /** Whether a sign-in with no organization creates one. Undefined is off,

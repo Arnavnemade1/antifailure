@@ -325,7 +325,8 @@ export interface ServerOptions {
    */
   artifactStores?: ArtifactStores
   /** The artifact limits, overridden by tests that need small ones. */
-  artifactLimits?: Pick<ArtifactRouteOptions, 'orgQuotaBytes' | 'inFlightBytes' | 'bodyDeadlineMs'>
+  artifactLimits?: Pick<ArtifactRouteOptions,
+    'orgQuotaBytes' | 'inFlightBytes' | 'orgInFlightBytes' | 'bodyDeadlineMs' | 'bodyPace'>
   /** The build, reported as a label on af_control_plane_info so a graph can
    *  say which version produced a number. */
   version?: string

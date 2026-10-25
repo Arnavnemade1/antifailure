@@ -102,8 +102,62 @@ export function describeArtifactQuota(bytes: number): string {
     : `each organization may keep ${mib} MiB of run artifacts (AF_ARTIFACT_ORG_QUOTA_MIB=${mib})`
 }
 
-/** How long a body may take to arrive once reading has started. */
+/**
+ * The default for how many upload bytes ONE organization holds at once, in
+ * any one process.
+ *
+ * The process budget alone was a resource every tenant shared and any one of
+ * them could take: a reservation is the declared length, made before a byte
+ * arrives, so an engine token that opened two uploads declaring 64 MiB each
+ * and sent nothing held the whole 128 MiB, and every other organization's
+ * upload was refused as busy until the body deadline let go. This is one
+ * reservation of the largest kind, half the process budget, so a single
+ * organization can never hold more than its share, and a second organization
+ * always finds room.
+ */
+export const DEFAULT_ORG_IN_FLIGHT_BYTES = 64 * MIB
+
+/** How long a body may take to arrive once reading has started, in total. */
 export const DEFAULT_BODY_DEADLINE_MS = 5 * 60 * 1000
+
+/**
+ * How long a body may go without a single byte arriving.
+ *
+ * The total deadline alone let a client that sent three bytes and stopped
+ * keep its reservation for the full five minutes. Fifteen seconds is far
+ * longer than any pause a CI runner's upload has, and short enough that a
+ * stalled one gives its memory back promptly.
+ */
+export const DEFAULT_BODY_IDLE_MS = 15 * 1000
+
+/**
+ * The slowest a body may arrive on average, after the grace period below.
+ *
+ * The idle timeout alone is defeated by one byte every fourteen seconds. 256
+ * KiB a second is two megabits, which a CI runner exceeds by orders of
+ * magnitude, and at which the largest artifact arrives in about four and a
+ * quarter minutes, inside the total deadline.
+ */
+export const DEFAULT_BODY_MIN_BYTES_PER_SECOND = 256 * 1024
+
+/** How long a body gets before the minimum rate applies, for a slow start. */
+export const DEFAULT_BODY_GRACE_MS = 10 * 1000
+
+/** How a body must keep arriving once it has started. */
+export interface BodyPace {
+  /** The longest gap between two pieces of the body. */
+  idleMs: number
+  /** The slowest average rate, measured from the start once graceMs has passed. */
+  minBytesPerSecond: number
+  /** How long before the average rate is enforced. */
+  graceMs: number
+}
+
+export const DEFAULT_BODY_PACE: BodyPace = {
+  idleMs: DEFAULT_BODY_IDLE_MS,
+  minBytesPerSecond: DEFAULT_BODY_MIN_BYTES_PER_SECOND,
+  graceMs: DEFAULT_BODY_GRACE_MS,
+}
 
 export interface ArtifactRouteOptions {
   pool: Pool
@@ -115,8 +169,12 @@ export interface ArtifactRouteOptions {
   orgQuotaBytes?: number
   /** How many upload bytes this process may hold in memory at once. */
   inFlightBytes?: number
+  /** How many of those one organization may hold. */
+  orgInFlightBytes?: number
   /** How long a body may take to arrive. */
   bodyDeadlineMs?: number
+  /** How a body must keep arriving: the idle gap and the minimum rate. */
+  bodyPace?: BodyPace
 }
 
 /**
@@ -147,22 +205,69 @@ export class ByteBudget {
 }
 
 /**
+ * The same budget, one per organization, for the share of the process budget
+ * one tenant may hold. An organization with nothing in flight has no entry, so
+ * the map is the size of what is arriving rather than of every tenant seen.
+ */
+export class OrgByteBudgets {
+  private readonly used = new Map<string, number>()
+  readonly capacity: number
+  constructor(capacity: number) {
+    this.capacity = capacity
+  }
+  reserve(orgId: string, bytes: number): boolean {
+    const now = this.used.get(orgId) ?? 0
+    if (bytes > this.capacity || now + bytes > this.capacity) return false
+    this.used.set(orgId, now + bytes)
+    return true
+  }
+  release(orgId: string, bytes: number): void {
+    const left = (this.used.get(orgId) ?? 0) - bytes
+    if (left > 0) this.used.set(orgId, left)
+    else this.used.delete(orgId)
+  }
+  inUse(orgId: string): number {
+    return this.used.get(orgId) ?? 0
+  }
+}
+
+/**
  * Reads exactly `declared` bytes, or refuses.
  *
  * A body longer than it said is cut off at the first byte past the declaration,
  * and one shorter is refused once it ends, because the digest the engine sent
  * is of the length it declared and a different length is a different file.
  */
-export async function readExactly(request: Request, declared: number, deadlineMs: number): Promise<Buffer> {
+export async function readExactly(
+  request: Request, declared: number, deadlineMs: number, pace: BodyPace = DEFAULT_BODY_PACE,
+): Promise<Buffer> {
   if (!request.body) throw new ArtifactRefusal(400, 'length', 'The upload has no body.')
   const reader = request.body.getReader()
   const out = Buffer.allocUnsafe(declared)
   let received = 0
-  let timedOut = false
-  const timer = setTimeout(() => {
-    timedOut = true
-    void reader.cancel('the body took too long to arrive').catch(() => {})
-  }, deadlineMs)
+  let stopped: string | null = null
+  const stop = (why: string) => {
+    if (stopped !== null) return
+    stopped = why
+    void reader.cancel(why).catch(() => {})
+  }
+  const timer = setTimeout(() => stop(
+    `The body did not arrive within ${Math.round(deadlineMs / 1000)} seconds.`), deadlineMs)
+  // The pace is checked on a tick rather than on each piece, because a client
+  // that has stopped sending produces no piece to check it on.
+  const started = Date.now()
+  let lastByteAt = started
+  const pacer = setInterval(() => {
+    const now = Date.now()
+    if (now - lastByteAt > pace.idleMs) {
+      stop(`No part of the body arrived for ${Math.round(pace.idleMs / 1000)} seconds.`)
+      return
+    }
+    const elapsed = now - started
+    if (elapsed > pace.graceMs && received < (pace.minBytesPerSecond * (elapsed - pace.graceMs)) / 1000) {
+      stop(`The body arrived more slowly than ${Math.round(pace.minBytesPerSecond / 1024)} KiB a second.`)
+    }
+  }, Math.max(10, Math.min(1000, Math.floor(pace.idleMs / 4))))
   try {
     for (;;) {
       const { done, value } = await reader.read()
@@ -173,18 +278,20 @@ export async function readExactly(request: Request, declared: number, deadlineMs
       }
       out.set(value, received)
       received += value.byteLength
+      lastByteAt = Date.now()
     }
   } catch (err) {
     if (err instanceof ArtifactRefusal) throw err
     throw new ArtifactRefusal(400, 'length', 'The body ended before it was complete.')
   } finally {
     clearTimeout(timer)
+    clearInterval(pacer)
     reader.releaseLock()
   }
-  if (timedOut) {
-    throw new ArtifactRefusal(400, 'too_slow',
-      `The body did not arrive within ${Math.round(deadlineMs / 1000)} seconds.`)
-  }
+  // A cancelled read resolves as the end of the body rather than rejecting,
+  // so a body stopped by the pace or the deadline arrives here, and is named
+  // for why it stopped rather than for being short.
+  if (stopped !== null) throw new ArtifactRefusal(400, 'too_slow', stopped)
   if (received !== declared) {
     throw new ArtifactRefusal(
       400, 'length', `The body is ${received} bytes and Content-Length declared ${declared}.`,
@@ -250,7 +357,9 @@ export function mountArtifacts<E extends Env>(app: Hono<E>, options: ArtifactRou
   const { pool, clock, stores } = options
   const quota = options.orgQuotaBytes ?? DEFAULT_ORG_QUOTA_BYTES
   const budget = new ByteBudget(options.inFlightBytes ?? DEFAULT_IN_FLIGHT_BYTES)
+  const orgBudgets = new OrgByteBudgets(options.orgInFlightBytes ?? DEFAULT_ORG_IN_FLIGHT_BYTES)
   const deadlineMs = options.bodyDeadlineMs ?? DEFAULT_BODY_DEADLINE_MS
+  const pace = options.bodyPace ?? DEFAULT_BODY_PACE
 
   const refuse = (c: Context<E>, err: ArtifactRefusal) => {
     if (err.retryAfterSeconds !== null) c.header('retry-after', String(err.retryAfterSeconds))
@@ -350,12 +459,24 @@ export function mountArtifacts<E extends Env>(app: Hono<E>, options: ArtifactRou
       return c.json({ ...before.existing, created: false }, 200)
     }
 
+    // The organization's share first, then the process's, so that one
+    // tenant's uploads are refused by its own cap before they can reach the
+    // budget every tenant shares. Both are released in the finally below,
+    // which every exit reaches: a refusal, a stalled or slow body cut off by
+    // the pace, a client that disconnects (the read then rejects), and a
+    // throw from the database.
+    if (!orgBudgets.reserve(engine.orgId, declared.sizeBytes)) {
+      return refuse(c, new ArtifactRefusal(429, 'busy',
+        'This organization already has as many artifacts arriving as one organization may send at ' +
+        'once. Try again shortly.', 10))
+    }
     if (!budget.reserve(declared.sizeBytes)) {
+      orgBudgets.release(engine.orgId, declared.sizeBytes)
       return refuse(c, new ArtifactRefusal(429, 'busy',
         'This server is already receiving as many artifacts as it holds at once. Try again shortly.', 10))
     }
     try {
-      const bytes = await readExactly(c.req.raw, declared.sizeBytes, deadlineMs)
+      const bytes = await readExactly(c.req.raw, declared.sizeBytes, deadlineMs, pace)
       const digest = createHash('sha256').update(bytes).digest('hex')
       if (digest !== declared.sha256) {
         throw new ArtifactRefusal(422, 'digest_mismatch',
@@ -452,6 +573,7 @@ export function mountArtifacts<E extends Env>(app: Hono<E>, options: ArtifactRou
       throw err
     } finally {
       budget.release(declared.sizeBytes)
+      orgBudgets.release(engine.orgId, declared.sizeBytes)
     }
   })
 

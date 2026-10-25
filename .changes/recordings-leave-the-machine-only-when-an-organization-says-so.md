@@ -21,7 +21,10 @@ organization's artifact as not found, and is served with a sandboxing
 `Content-Security-Policy`, `nosniff` and `no-store`. A file past its expiry is answered
 as not found from that moment, by the database's clock, rather than served
 until the sweep removes its bytes, and deleting the organization deletes its
-recordings.
+recordings. One organization may hold at most half of the memory a process
+reserves for uploads arriving, and an upload that stalls or trickles is cut
+off and gives that memory back, so one engine token cannot keep every other
+organization's uploads refused as busy.
 
 The trust boundary page now lists run recordings as opt in rather than as never
 leaving the machine, and says what a recording can carry.

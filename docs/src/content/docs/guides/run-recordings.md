@@ -103,7 +103,11 @@ more than the quota. A self-hosted installation can change the quota with
 `AF_ARTIFACT_ORG_QUOTA_MIB`; see the
 [control plane reference](/docs/reference/control-plane).
 
-One control plane process holds at most 128 MiB of uploads in memory at once.
+One control plane process holds at most 128 MiB of uploads in memory at once,
+and one organization at most 64 MiB of that, so one organization's uploads can
+never keep another's out. An upload that stops sending for 15 seconds, or that
+averages less than 256 KiB a second after its first 10, is cut off and its
+memory is freed. The engine is told why, and the file stays on the machine.
 When it is full it asks the engine to wait, and the engine retries. It also
 retries when the control plane has not yet received the run's own events,
 after sending any events it still holds. Each file gets four attempts. After two network failures in
